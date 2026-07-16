@@ -116,6 +116,18 @@ function renderDualPriceChart(kakakuHist, amazonHist, width = 268, height = 84) 
   </div>`;
 }
 
+function renderKeepaSection(p) {
+  if (!p.keepa_graph_url) return "";
+  return `<details class="keepa-fold">
+    <summary class="keepa-summary">Keepa 過去価格グラフ（1年）</summary>
+    <a href="${escapeHtml(p.keepa_product_url)}" target="_blank" rel="noopener noreferrer" title="Keepaで詳細を見る">
+      <img class="keepa-chart" loading="lazy" src="${escapeHtml(p.keepa_graph_url)}" alt="Keepa価格推移グラフ"
+        onerror="this.parentElement.parentElement.classList.add('keepa-error')" />
+    </a>
+    <p class="tiny keepa-note">グラフ提供: keepa.com（Amazon新品/本体価格・過去365日）</p>
+  </details>`;
+}
+
 function renderPriceOverviewCard(p) {
   const kYen = p.latest_kakaku?.price_yen ?? p.latest_price?.price_yen;
   const aYen = p.latest_amazon?.price_yen;
@@ -137,6 +149,7 @@ function renderPriceOverviewCard(p) {
       </div>
     </div>
     ${chart}
+    ${renderKeepaSection(p)}
     <div class="price-card-links">
       <a href="${escapeHtml(p.kakaku_url)}" target="_blank" rel="noopener noreferrer">価格.com</a>
       <a href="${escapeHtml(p.amazon_url)}" target="_blank" rel="noopener noreferrer">Amazon</a>

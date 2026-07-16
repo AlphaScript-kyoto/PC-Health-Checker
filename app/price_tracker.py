@@ -99,6 +99,7 @@ def get_tracker_state() -> dict[str, Any]:
         sources = latest_by_source.get(cid) or {}
         kakaku_hist = db.get_price_history(cid, limit=52, source="kakaku")
         amazon_hist = db.get_price_history(cid, limit=52, source="amazon")
+        asin = db.get_meta(f"amazon_asin:{cid}")
         overview.append(
             {
                 **meta,
@@ -110,6 +111,9 @@ def get_tracker_state() -> dict[str, Any]:
                 "amazon_history": amazon_hist,
                 "kakaku_url": _kakaku_url(meta.get("query") or meta.get("name") or cid),
                 "amazon_url": _amazon_url(meta.get("query") or meta.get("name") or cid),
+                "amazon_asin": asin,
+                "keepa_graph_url": keepa_graph_url(asin) if asin else None,
+                "keepa_product_url": keepa_product_url(asin) if asin else None,
             }
         )
 
@@ -197,6 +201,34 @@ def _amazon_url(query: str) -> str:
     return f"https://www.amazon.co.jp/s?k={urllib.parse.quote(query)}"
 
 
+def _extract_asin(html: str) -> str | None:
+    """First organic (non-sponsored) search-result ASIN for Keepa graph embedding."""
+    matches = list(re.finditer(r'data-asin="(B[0-9A-Z]{9})"', html))
+    fallback: str | None = None
+    for i, m in enumerate(matches):
+        if fallback is None:
+            fallback = m.group(1)
+        end = matches[i + 1].start() if i + 1 < len(matches) else min(len(html), m.start() + 8000)
+        chunk = html[m.start():end]
+        if "スポンサー" in chunk or "Sponsored" in chunk or "AdHolder" in chunk:
+            continue
+        return m.group(1)
+    return fallback
+
+
+def keepa_graph_url(asin: str) -> str:
+    return (
+        "https://graph.keepa.com/pricehistory.png"
+        f"?asin={asin}&domain=co.jp&amazon=1&new=1&used=0&salesrank=0"
+        "&range=365&width=560&height=200"
+    )
+
+
+def keepa_product_url(asin: str) -> str:
+    # 5 = Keepa country code for amazon.co.jp
+    return f"https://keepa.com/#!product/5-{asin}"
+
+
 def _average_new_price(candidates: list[int]) -> tuple[int | None, int]:
     """Average of top search-result (new listing) prices, outliers removed.
 
@@ -214,6 +246,10 @@ def _average_new_price(candidates: list[int]) -> tuple[int | None, int]:
     return round(sum(kept) / len(kept)), len(kept)
 
 
+def _looks_blocked(html: str) -> bool:
+    return "api-services-support@amazon.com" in html or "validateCaptcha" in html
+
+
 def _fetch_amazon_price(query: str) -> dict[str, Any] | None:
     """Amazon.co.jp search scrape: average of new-listing prices (no auto-purchase)."""
     url = _amazon_url(query)
@@ -228,10 +264,23 @@ def _fetch_amazon_price(query: str) -> dict[str, Any] | None:
     }
     try:
         with httpx.Client(timeout=12.0, follow_redirects=True, headers=headers) as client:
-            resp = client.get(url)
-            if resp.status_code >= 400:
-                return None
-            html = resp.text
+            html = ""
+            for attempt in range(3):
+                if attempt:
+                    time.sleep(4.0 * attempt)
+                resp = client.get(url)
+                if resp.status_code >= 400:
+                    continue
+                html = resp.text
+                if not _looks_blocked(html):
+                    break
+            else:
+                return {
+                    "price_yen": None,
+                    "url": url,
+                    "source": "amazon",
+                    "note": "Amazonが一時的にアクセス制限中（次回更新で再取得）",
+                }
             candidates: list[int] = []
             # Prefer structured search-result prices (avoids junk accessory hits)
             for m in re.finditer(
@@ -263,6 +312,7 @@ def _fetch_amazon_price(query: str) -> dict[str, Any] | None:
                     "url": url,
                     "source": "amazon",
                     "note": "Amazon価格抽出失敗",
+                    "asin": _extract_asin(html),
                 }
             avg, used = _average_new_price(candidates)
             return {
@@ -270,6 +320,7 @@ def _fetch_amazon_price(query: str) -> dict[str, Any] | None:
                 "url": url,
                 "source": "amazon",
                 "note": f"新品出品 {used}件の平均",
+                "asin": _extract_asin(html),
             }
     except Exception as exc:
         return {"price_yen": None, "url": url, "source": "amazon", "note": str(exc)}
@@ -351,6 +402,8 @@ def refresh_prices(force: bool = False) -> dict[str, Any]:
         query = (meta or {}).get("query") or t.get("query") or t.get("display_name") or cid
         for fetcher in (_fetch_kakaku_price, _fetch_amazon_price):
             fetched = fetcher(query) or {}
+            if fetched.get("asin"):
+                db.set_meta(f"amazon_asin:{cid}", fetched["asin"])
             db.add_price_point(
                 cid,
                 price_yen=fetched.get("price_yen"),
@@ -359,8 +412,9 @@ def refresh_prices(force: bool = False) -> dict[str, Any]:
                 note=fetched.get("note"),
             )
             results.append({"catalog_id": cid, "query": query, **fetched})
-            time.sleep(0.5)
-        time.sleep(0.3)
+            # Amazon rate-limits rapid sequential hits; keep a polite gap
+            time.sleep(1.5)
+        time.sleep(1.0)
 
     db.set_meta("last_price_fetch", _utc_now())
     return {"skipped": False, "updated": len(results), "results": results, "state": get_tracker_state()}

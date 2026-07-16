@@ -797,6 +797,33 @@ details.price-overview-group:not([open]) .chevron {
 }
 .price-card-links a { color: var(--accent); font-weight: 600; }
 
+.keepa-fold {
+  margin-top: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.02);
+}
+.keepa-summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  list-style: none;
+}
+.keepa-summary::-webkit-details-marker { display: none; }
+.keepa-summary::before { content: "▸ "; }
+.keepa-fold[open] .keepa-summary::before { content: "▾ "; }
+.keepa-chart {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  border-radius: 8px;
+  background: #fff;
+}
+.keepa-note { margin: 4px 0 0; }
+.keepa-fold.keepa-error { display: none; }
+
 .price-chart-wrap { margin-top: 4px; }
 .price-chart {
   display: block;
