@@ -45,6 +45,124 @@ function fmtTime(iso) {
   }
 }
 
+function fmtYen(v) {
+  if (v == null || v === "") return "—";
+  return `¥${Number(v).toLocaleString()}`;
+}
+
+const PRICE_CATEGORY_JA = {
+  cpu: "CPU",
+  gpu: "GPU",
+  hdd: "HDD",
+  sata_ssd: "SATA SSD",
+  m2_ssd: "M.2 SSD",
+  memory: "メモリ",
+  motherboard: "マザーボード",
+};
+
+function renderDualPriceChart(kakakuHist, amazonHist, width = 268, height = 84) {
+  const series = [
+    { key: "kakaku", hist: kakakuHist || [], cls: "chart-kakaku" },
+    { key: "amazon", hist: amazonHist || [], cls: "chart-amazon" },
+  ];
+  const points = [];
+  for (const s of series) {
+    for (const h of s.hist) {
+      if (h.price_yen == null) continue;
+      const t = new Date(h.fetched_at).getTime();
+      if (!Number.isFinite(t)) continue;
+      points.push({ t, y: h.price_yen, key: s.key });
+    }
+  }
+  if (!points.length) {
+    return `<div class="price-chart-empty">「今すぐ価格更新」で履歴が溜まるとグラフ表示</div>`;
+  }
+  const minT = Math.min(...points.map((p) => p.t));
+  const maxT = Math.max(...points.map((p) => p.t));
+  const prices = points.map((p) => p.y);
+  const minY = Math.min(...prices);
+  const maxY = Math.max(...prices);
+  const pad = { l: 4, r: 4, t: 10, b: 16 };
+  const iw = width - pad.l - pad.r;
+  const ih = height - pad.t - pad.b;
+  const xOf = (t) => pad.l + (maxT === minT ? iw / 2 : ((t - minT) / (maxT - minT)) * iw);
+  const yOf = (y) => pad.t + ih - (maxY === minY ? ih / 2 : ((y - minY) / (maxY - minY)) * ih);
+
+  const paths = series
+    .map((s) => {
+      const pts = (s.hist || []).filter((h) => h.price_yen != null);
+      if (!pts.length) return "";
+      const d = pts
+        .map((h, i) => {
+          const x = xOf(new Date(h.fetched_at).getTime());
+          const y = yOf(h.price_yen);
+          return `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+        })
+        .join(" ");
+      return `<path d="${d}" class="chart-line ${s.cls}" fill="none" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+    })
+    .join("");
+
+  return `<div class="price-chart-wrap">
+    <svg class="price-chart" viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="価格推移グラフ">
+      <text x="${pad.l}" y="${height - 3}" class="chart-label">${fmtYen(minY)}</text>
+      <text x="${width - pad.r}" y="${pad.t + 8}" class="chart-label chart-label-end" text-anchor="end">${fmtYen(maxY)}</text>
+      ${paths}
+    </svg>
+    <div class="chart-legend">
+      <span class="legend-kakaku">価格.com</span>
+      <span class="legend-amazon">Amazon</span>
+    </div>
+  </div>`;
+}
+
+function renderPriceOverviewCard(p) {
+  const kYen = p.latest_kakaku?.price_yen ?? p.latest_price?.price_yen;
+  const aYen = p.latest_amazon?.price_yen;
+  const chart = renderDualPriceChart(p.kakaku_history, p.amazon_history);
+  return `<article class="card price-card">
+    <div class="price-card-head">
+      <strong class="price-card-title">${escapeHtml(p.name)}</strong>
+      <span class="badge OK">${escapeHtml(PRICE_CATEGORY_JA[p.category] || p.category || "")}</span>
+    </div>
+    <p class="tiny price-card-sub">${escapeHtml(p.brand || "")} / ${escapeHtml(p.generation || "")}${p.keep_legacy ? " / 旧世代キープ" : ""}</p>
+    <div class="price-dual">
+      <div class="price-source">
+        <span class="price-source-label legend-kakaku">価格.com</span>
+        <div class="price-now">${fmtYen(kYen)}</div>
+      </div>
+      <div class="price-source">
+        <span class="price-source-label legend-amazon">Amazon</span>
+        <div class="price-now price-now-amazon">${fmtYen(aYen)}</div>
+      </div>
+    </div>
+    ${chart}
+    <div class="price-card-links">
+      <a href="${escapeHtml(p.kakaku_url)}" target="_blank" rel="noopener noreferrer">価格.com</a>
+      <a href="${escapeHtml(p.amazon_url)}" target="_blank" rel="noopener noreferrer">Amazon</a>
+    </div>
+  </article>`;
+}
+
+function groupOverviewByCategory(overview) {
+  const order = ["cpu", "gpu", "motherboard", "memory", "m2_ssd", "sata_ssd", "hdd"];
+  const map = {};
+  for (const p of overview) {
+    const cat = p.category || "other";
+    if (!map[cat]) map[cat] = [];
+    map[cat].push(p);
+  }
+  const keys = [
+    ...order.filter((k) => map[k]),
+    ...Object.keys(map).filter((k) => !order.includes(k)),
+  ];
+  return keys.map((cat) => ({
+    category: cat,
+    label: PRICE_CATEGORY_JA[cat] || cat,
+    items: map[cat],
+  }));
+}
+
 async function api(path, options) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -457,29 +575,25 @@ async function renderPrices() {
       }
     }
 
-    // Overview of tracked prices
+    // Overview of tracked prices (grid + collapsible by category)
     const overview = state.overview || [];
     if (!overview.length) {
       overviewEl.innerHTML = `<div class="card"><p class="tiny">まだトラッキング対象がありません。下のリストから複数選択して保存してください。</p></div>`;
+      overviewEl.className = "price-overview";
     } else {
-      overviewEl.innerHTML = overview
-        .map((p) => {
-          const yen = p.latest_price?.price_yen;
-          const hist = (p.history || []).map((h) => h.price_yen).filter((v) => v != null);
-          const max = Math.max(...hist, 1);
-          const spark = hist.length
-            ? `<div class="sparkline">${hist
-                .map((v) => `<i style="height:${Math.max(4, Math.round((v / max) * 40))}px" title="¥${Number(v).toLocaleString()}"></i>`)
-                .join("")}</div>`
-            : `<p class="tiny">価格履歴はまだありません</p>`;
-          return `<article class="card price-card">
-            <div class="row"><strong>${escapeHtml(p.name)}</strong><span class="badge OK">${escapeHtml(p.category || "")}</span></div>
-            <p class="tiny">${escapeHtml(p.brand || "")} / ${escapeHtml(p.generation || "")}${p.keep_legacy ? " / 旧世代キープ" : ""}</p>
-            <div class="price-now">${yen != null ? `¥${Number(yen).toLocaleString()}` : "—"}</div>
-            ${spark}
-            <p class="tiny" style="margin-top:8px"><a href="${escapeHtml(p.kakaku_url)}" target="_blank" rel="noopener noreferrer">価格.comで見る</a></p>
-          </article>`;
-        })
+      overviewEl.className = "price-overview";
+      const groups = groupOverviewByCategory(overview);
+      overviewEl.innerHTML = groups
+        .map(
+          (g, gi) => `<details class="price-overview-group"${gi === 0 ? " open" : ""}>
+          <summary class="price-overview-summary">
+            <h3>${escapeHtml(g.label)}</h3>
+            <span class="fold-hint">${g.items.length} 件</span>
+            <span class="chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="price-overview-grid">${g.items.map((p) => renderPriceOverviewCard(p)).join("")}</div>
+        </details>`
+        )
         .join("");
     }
 
@@ -507,7 +621,7 @@ async function renderPrices() {
             </details>`;
           })
           .join("");
-        return `<details class="price-group" open>
+        return `<details class="price-group"${g === (state.groups || [])[0] ? " open" : ""}>
           <summary class="price-group-summary">
             <h3>${escapeHtml(g.label)}</h3>
             <span class="fold-hint">クリックで開閉</span>

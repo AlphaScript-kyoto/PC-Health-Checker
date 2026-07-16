@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=20260716g" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260716h" />
 </head>
 <body>
   <div class="shell">
@@ -73,7 +73,7 @@
 
         <section id="tab-prices" class="panel">
           <div class="news-toolbar">
-            <p class="section-note">チェックしたパーツを週次で価格.com相場トラッキング。世代更新でリスト外になったものは残すか外せます。</p>
+            <p class="section-note">チェックしたパーツを週次で価格.com・Amazonの最安目安を記録。Keepa風の推移グラフ付き。自動購入はしません。</p>
             <div class="price-actions">
               <button type="button" id="btnPriceRefresh" class="btn-ghost">今すぐ価格更新</button>
               <button type="button" id="btnPriceSave" class="btn-primary">選択を保存</button>
@@ -81,7 +81,7 @@
           </div>
           <div id="orphanBox" class="orphan-box" hidden></div>
           <p class="tiny" id="priceMeta"></p>
-          <div id="priceOverview" class="stack"></div>
+          <div id="priceOverview" class="price-overview"></div>
           <h2 class="block-title">トラッキング対象（複数選択）</h2>
           <div id="priceCatalog" class="price-catalog"></div>
         </section>
@@ -157,6 +157,6 @@
       </main>
     </div>
   </div>
-  <script src="/static/app.js?v=20260716g"></script>
+  <script src="/static/app.js?v=20260716h"></script>
 </body>
 </html>

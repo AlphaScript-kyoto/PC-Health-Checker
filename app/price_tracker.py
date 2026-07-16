@@ -82,7 +82,7 @@ def get_tracker_state() -> dict[str, Any]:
             }
             legacy_items.append({**snap, "keep_legacy": True})
 
-    latest_prices = db.get_latest_prices(list(tracked_ids))
+    latest_by_source = db.get_latest_prices_by_source(list(tracked_ids))
     overview = []
     for t in tracked:
         if t.get("pending_decision") and not t.get("keep_legacy"):
@@ -96,16 +96,20 @@ def get_tracker_state() -> dict[str, Any]:
             "generation": "キープ中（旧世代）",
             "query": t.get("query") or "",
         }
-        price = latest_prices.get(cid)
-        history = db.get_price_history(cid, limit=12)
+        sources = latest_by_source.get(cid) or {}
+        kakaku_hist = db.get_price_history(cid, limit=52, source="kakaku")
+        amazon_hist = db.get_price_history(cid, limit=52, source="amazon")
         overview.append(
             {
                 **meta,
                 "tracked": True,
                 "keep_legacy": bool(t.get("keep_legacy")),
-                "latest_price": price,
-                "history": history,
+                "latest_kakaku": sources.get("kakaku"),
+                "latest_amazon": sources.get("amazon"),
+                "kakaku_history": kakaku_hist,
+                "amazon_history": amazon_hist,
                 "kakaku_url": _kakaku_url(meta.get("query") or meta.get("name") or cid),
+                "amazon_url": _amazon_url(meta.get("query") or meta.get("name") or cid),
             }
         )
 
@@ -189,6 +193,70 @@ def resolve_orphans(decisions: dict[str, str]) -> dict[str, Any]:
     return get_tracker_state()
 
 
+def _amazon_url(query: str) -> str:
+    return f"https://www.amazon.co.jp/s?k={urllib.parse.quote(query)}"
+
+
+def _fetch_amazon_price(query: str) -> dict[str, Any] | None:
+    """Lightweight Amazon.co.jp search lowest-price scrape (no auto-purchase)."""
+    url = _amazon_url(query)
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://www.amazon.co.jp/",
+    }
+    try:
+        with httpx.Client(timeout=12.0, follow_redirects=True, headers=headers) as client:
+            resp = client.get(url)
+            if resp.status_code >= 400:
+                return None
+            html = resp.text
+            candidates: list[int] = []
+            # Prefer structured search-result prices (avoids junk accessory hits)
+            for m in re.finditer(
+                r'a-price-whole[^>]*>\s*([0-9]{1,3}(?:,[0-9]{3})*)', html, flags=re.I
+            ):
+                try:
+                    val = int(m.group(1).replace(",", ""))
+                except ValueError:
+                    continue
+                if 10_000 <= val <= 2_000_000:
+                    candidates.append(val)
+            if not candidates:
+                for pat in (
+                    r'a-offscreen">\s*[^0-9]{0,4}([0-9]{1,3}(?:,[0-9]{3})*)',
+                    r'"priceAmount"\s*:\s*([0-9]{4,7})',
+                ):
+                    for m in re.finditer(pat, html, flags=re.I):
+                        try:
+                            val = int(m.group(1).replace(",", ""))
+                        except ValueError:
+                            continue
+                        if 10_000 <= val <= 2_000_000:
+                            candidates.append(val)
+                    if candidates:
+                        break
+            if not candidates:
+                return {
+                    "price_yen": None,
+                    "url": url,
+                    "source": "amazon",
+                    "note": "Amazon価格抽出失敗",
+                }
+            return {
+                "price_yen": min(candidates),
+                "url": url,
+                "source": "amazon",
+                "note": None,
+            }
+    except Exception as exc:
+        return {"price_yen": None, "url": url, "source": "amazon", "note": str(exc)}
+
+
 def _kakaku_url(query: str) -> str:
     return f"https://kakaku.com/search_results/{urllib.parse.quote(query)}/"
 
@@ -263,16 +331,18 @@ def refresh_prices(force: bool = False) -> dict[str, Any]:
         cid = t["catalog_id"]
         meta = by_id.get(cid)
         query = (meta or {}).get("query") or t.get("query") or t.get("display_name") or cid
-        fetched = _fetch_kakaku_price(query) or {}
-        db.add_price_point(
-            cid,
-            price_yen=fetched.get("price_yen"),
-            source=fetched.get("source") or "kakaku",
-            url=fetched.get("url"),
-            note=fetched.get("note"),
-        )
-        results.append({"catalog_id": cid, "query": query, **fetched})
-        time.sleep(0.6)
+        for fetcher in (_fetch_kakaku_price, _fetch_amazon_price):
+            fetched = fetcher(query) or {}
+            db.add_price_point(
+                cid,
+                price_yen=fetched.get("price_yen"),
+                source=fetched.get("source") or "kakaku",
+                url=fetched.get("url"),
+                note=fetched.get("note"),
+            )
+            results.append({"catalog_id": cid, "query": query, **fetched})
+            time.sleep(0.5)
+        time.sleep(0.3)
 
     db.set_meta("last_price_fetch", _utc_now())
     return {"skipped": False, "updated": len(results), "results": results, "state": get_tracker_state()}

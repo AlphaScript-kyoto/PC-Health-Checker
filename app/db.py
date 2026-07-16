@@ -420,15 +420,50 @@ def get_latest_prices(catalog_ids: list[str]) -> dict[str, dict[str, Any]]:
     return result
 
 
-def get_price_history(catalog_id: str, limit: int = 24) -> list[dict[str, Any]]:
+def get_latest_prices_by_source(catalog_ids: list[str]) -> dict[str, dict[str, dict[str, Any]]]:
+    """Latest price per catalog_id and source (kakaku / amazon)."""
+    if not catalog_ids:
+        return {}
+    result: dict[str, dict[str, dict[str, Any]]] = {cid: {} for cid in catalog_ids}
     with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT price_yen, source, url, note, fetched_at
-            FROM price_history
-            WHERE catalog_id = ?
-            ORDER BY id DESC LIMIT ?
-            """,
-            (catalog_id, limit),
-        ).fetchall()
+        for cid in catalog_ids:
+            for source in ("kakaku", "amazon"):
+                row = conn.execute(
+                    """
+                    SELECT catalog_id, price_yen, source, url, note, fetched_at
+                    FROM price_history
+                    WHERE catalog_id = ? AND source = ?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (cid, source),
+                ).fetchone()
+                if row:
+                    result[cid][source] = dict(row)
+    return result
+
+
+def get_price_history(
+    catalog_id: str, limit: int = 52, source: str | None = None
+) -> list[dict[str, Any]]:
+    with connect() as conn:
+        if source:
+            rows = conn.execute(
+                """
+                SELECT price_yen, source, url, note, fetched_at
+                FROM price_history
+                WHERE catalog_id = ? AND source = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (catalog_id, source, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT price_yen, source, url, note, fetched_at
+                FROM price_history
+                WHERE catalog_id = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (catalog_id, limit),
+            ).fetchall()
     return list(reversed([dict(r) for r in rows]))
