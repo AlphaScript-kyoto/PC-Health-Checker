@@ -135,7 +135,7 @@ function renderPriceOverviewCard(p) {
   return `<article class="card price-card">
     <div class="price-card-head">
       <strong class="price-card-title">${escapeHtml(p.name)}</strong>
-      <span class="badge OK">${escapeHtml(PRICE_CATEGORY_JA[p.category] || p.category || "")}</span>
+      <span class="badge tag">${escapeHtml(PRICE_CATEGORY_JA[p.category] || p.category || "")}</span>
     </div>
     <p class="tiny price-card-sub">${escapeHtml(p.brand || "")} / ${escapeHtml(p.generation || "")}${p.keep_legacy ? " / 旧世代キープ" : ""}</p>
     <div class="price-dual">
@@ -193,26 +193,29 @@ function renderInventory(inv) {
     $("#inventory").innerHTML = "<p class='muted'>データなし</p>";
     return;
   }
+  const memDetail = inv.memory_summary
+    ? `<span class="mem-detail">${escapeHtml(inv.memory_summary)}</span>`
+    : "";
   $("#inventory").innerHTML = `
     <div class="card">
-      <div class="row"><span>ホスト</span><strong>${inv.hostname || "-"}</strong></div>
-      <div class="row"><span>CPU</span><strong>${inv.cpu_name || "-"}</strong></div>
-      ${inv.gpu_summary ? `<div class="row"><span>GPU</span><strong>${inv.gpu_summary}</strong></div>` : ""}
-      <div class="row"><span>メモリ</span><strong>${inv.total_memory_gb ?? "-"} GB（使用 ${inv.memory_used_pct ?? "-"}%）${inv.memory_summary ? `<span class="mem-detail">${inv.memory_summary}</span>` : ""}</strong></div>
-      <div class="row"><span>機種</span><strong>${inv.manufacturer || ""} ${inv.model || ""}</strong></div>
-      <div class="row"><span>OS</span><strong>${inv.os_caption || inv.platform || "-"}</strong></div>
+      <div class="row"><span>ホスト</span><strong>${escapeHtml(inv.hostname || "-")}</strong></div>
+      <div class="row"><span>CPU</span><strong>${escapeHtml(inv.cpu_name || "-")}</strong></div>
+      ${inv.gpu_summary ? `<div class="row"><span>GPU</span><strong>${escapeHtml(inv.gpu_summary)}</strong></div>` : ""}
+      <div class="row"><span>メモリ</span><strong>${escapeHtml(String(inv.total_memory_gb ?? "-"))} GB（使用 ${escapeHtml(String(inv.memory_used_pct ?? "-"))}%）${memDetail}</strong></div>
+      <div class="row"><span>機種</span><strong>${escapeHtml(`${inv.manufacturer || ""} ${inv.model || ""}`.trim() || "-")}</strong></div>
+      <div class="row"><span>OS</span><strong>${escapeHtml(inv.os_caption || inv.platform || "-")}</strong></div>
     </div>`;
 }
 
 function renderIssues(data) {
   const items = [];
   for (const v of data.volume_issues || []) {
-    items.push(`<div class="card"><div class="row"><strong>${v.letter}</strong>${badge(v.risk_level)}</div><p class="muted">${v.reason}</p></div>`);
+    items.push(`<div class="card"><div class="row"><strong>${escapeHtml(v.letter || "")}</strong>${badge(v.risk_level)}</div><p class="muted">${escapeHtml(v.reason || "")}</p></div>`);
   }
   for (const d of data.disks || []) {
     if (d.risk_level && d.risk_level !== "OK") {
-      items.push(`<div class="card"><div class="row"><strong>${d.model}</strong>${badge(d.risk_level)}</div>
-        <ul class="reasons">${(d.reasons || []).map((r) => `<li>${r}</li>`).join("")}</ul></div>`);
+      items.push(`<div class="card"><div class="row"><strong>${escapeHtml(d.model || "")}</strong>${badge(d.risk_level)}</div>
+        <ul class="reasons">${(d.reasons || []).map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul></div>`);
     }
   }
   $("#issues").innerHTML = items.length ? items.join("") : "<div class='card'><p class='muted'>現時点で要注意項目はありません。</p></div>";
@@ -402,16 +405,16 @@ function renderRecommendations(list) {
       const links = (r.candidates || [])
         .map(
           (c) =>
-            `<a href="${c.url}" target="_blank" rel="noopener noreferrer"><strong>${c.source}</strong> — ${c.title}<br/><span class="muted">${c.condition} / ${c.price_hint}</span></a>`
+            `<a href="${escapeHtml(c.url || "#")}" target="_blank" rel="noopener noreferrer"><strong>${escapeHtml(c.source || "")}</strong> — ${escapeHtml(c.title || "")}<br/><span class="muted">${escapeHtml(c.condition || "")} / ${escapeHtml(c.price_hint || "")}</span></a>`
         )
         .join("");
       return `<div class="card">
-        <div class="row"><strong>${r.for_model || "対象不明"}</strong>${badge(r.risk_level)}</div>
-        <p class="muted">検索語: ${r.query}</p>
-        <p>${r.price_band || ""}</p>
-        <ul class="reasons">${(r.notes || []).map((n) => `<li>${n}</li>`).join("")}</ul>
+        <div class="row"><strong>${escapeHtml(r.for_model || "対象不明")}</strong>${badge(r.risk_level)}</div>
+        <p class="muted">検索語: ${escapeHtml(r.query || "")}</p>
+        <p>${escapeHtml(r.price_band || "")}</p>
+        <ul class="reasons">${(r.notes || []).map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul>
         <div class="links">${links}</div>
-        <p class="muted">${r.disclaimer || ""}</p>
+        <p class="muted">${escapeHtml(r.disclaimer || "")}</p>
       </div>`;
     })
     .join("");
@@ -427,8 +430,8 @@ async function renderAlerts() {
     $("#alerts").innerHTML = alerts
       .slice(0, 12)
       .map(
-        (a) => `<div class="card"><div class="row"><strong>${a.title}</strong>${badge(a.level)}</div>
-        <p class="muted">${fmtTime(a.created_at)} — ${a.message}</p></div>`
+        (a) => `<div class="card"><div class="row"><strong>${escapeHtml(a.title || "")}</strong>${badge(a.level)}</div>
+        <p class="muted">${escapeHtml(fmtTime(a.created_at))} — ${escapeHtml(a.message || "")}</p></div>`
       )
       .join("");
   } catch {

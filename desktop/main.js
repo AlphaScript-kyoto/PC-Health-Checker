@@ -300,7 +300,9 @@ if (!gotLock) {
       if (Notification.isSupported()) {
         new Notification({
           title: "PC Health",
-          body: "バックエンドの起動に失敗しました。.venv や Python 環境を確認してください。",
+          body: app.isPackaged
+            ? "バックエンドの起動に失敗しました。トレイから一度終了して開き直すか、同梱の readme.txt を確認してください。"
+            : "バックエンドの起動に失敗しました。.venv や Python 環境を確認してください。",
         }).show();
       }
       if (mainWindow && !mainWindow.isDestroyed()) {
