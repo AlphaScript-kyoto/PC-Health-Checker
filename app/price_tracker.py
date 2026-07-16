@@ -197,8 +197,25 @@ def _amazon_url(query: str) -> str:
     return f"https://www.amazon.co.jp/s?k={urllib.parse.quote(query)}"
 
 
+def _average_new_price(candidates: list[int]) -> tuple[int | None, int]:
+    """Average of top search-result (new listing) prices, outliers removed.
+
+    Search results mix in accessories/bundles, so keep only values within
+    0.55x-1.8x of the median before averaging.
+    """
+    if not candidates:
+        return None, 0
+    top = candidates[:12]  # document order == search relevance order
+    ordered = sorted(top)
+    median = ordered[len(ordered) // 2]
+    kept = [v for v in top if 0.55 * median <= v <= 1.8 * median]
+    if not kept:
+        kept = [median]
+    return round(sum(kept) / len(kept)), len(kept)
+
+
 def _fetch_amazon_price(query: str) -> dict[str, Any] | None:
-    """Lightweight Amazon.co.jp search lowest-price scrape (no auto-purchase)."""
+    """Amazon.co.jp search scrape: average of new-listing prices (no auto-purchase)."""
     url = _amazon_url(query)
     headers = {
         "User-Agent": (
@@ -247,11 +264,12 @@ def _fetch_amazon_price(query: str) -> dict[str, Any] | None:
                     "source": "amazon",
                     "note": "Amazon価格抽出失敗",
                 }
+            avg, used = _average_new_price(candidates)
             return {
-                "price_yen": min(candidates),
+                "price_yen": avg,
                 "url": url,
                 "source": "amazon",
-                "note": None,
+                "note": f"新品出品 {used}件の平均",
             }
     except Exception as exc:
         return {"price_yen": None, "url": url, "source": "amazon", "note": str(exc)}

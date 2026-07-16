@@ -110,8 +110,8 @@ function renderDualPriceChart(kakakuHist, amazonHist, width = 268, height = 84) 
       ${paths}
     </svg>
     <div class="chart-legend">
-      <span class="legend-kakaku">価格.com</span>
-      <span class="legend-amazon">Amazon</span>
+      <span class="legend-kakaku">価格.com 最安</span>
+      <span class="legend-amazon">Amazon 新品平均</span>
     </div>
   </div>`;
 }
@@ -128,11 +128,11 @@ function renderPriceOverviewCard(p) {
     <p class="tiny price-card-sub">${escapeHtml(p.brand || "")} / ${escapeHtml(p.generation || "")}${p.keep_legacy ? " / 旧世代キープ" : ""}</p>
     <div class="price-dual">
       <div class="price-source">
-        <span class="price-source-label legend-kakaku">価格.com</span>
+        <span class="price-source-label legend-kakaku">価格.com 最安</span>
         <div class="price-now">${fmtYen(kYen)}</div>
       </div>
       <div class="price-source">
-        <span class="price-source-label legend-amazon">Amazon</span>
+        <span class="price-source-label legend-amazon">Amazon 新品平均</span>
         <div class="price-now price-now-amazon">${fmtYen(aYen)}</div>
       </div>
     </div>
