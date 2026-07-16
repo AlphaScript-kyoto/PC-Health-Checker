@@ -1,0 +1,285 @@
+from __future__ import annotations
+
+import re
+import time
+import urllib.parse
+from datetime import datetime, timezone
+from typing import Any
+
+import httpx
+
+from app import db
+from app.parts_catalog import (
+    CATALOG_VERSION,
+    active_catalog_ids,
+    catalog_by_id,
+    get_catalog_grouped,
+)
+
+WEEK_SEC = 7 * 24 * 60 * 60
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_catalog_migration() -> dict[str, Any]:
+    stored = db.get_catalog_version()
+    version_changed = stored is not None and stored != CATALOG_VERSION
+    active = active_catalog_ids()
+    by_id = catalog_by_id()
+    tracked = db.get_tracked_parts()
+    orphans: list[dict[str, Any]] = []
+
+    if stored != CATALOG_VERSION:
+        if version_changed:
+            for row in tracked:
+                cid = row["catalog_id"]
+                if cid not in active and not row.get("keep_legacy"):
+                    db.mark_tracked_pending(cid, True)
+        db.set_catalog_version(CATALOG_VERSION)
+        tracked = db.get_tracked_parts()
+
+    for row in tracked:
+        cid = row["catalog_id"]
+        if row.get("pending_decision") and not row.get("keep_legacy"):
+            info = by_id.get(cid) or {
+                "id": cid,
+                "name": row.get("display_name") or cid,
+                "category": row.get("category") or "legacy",
+                "brand": "",
+                "generation": "リスト外（旧世代）",
+                "query": row.get("query") or cid,
+            }
+            orphans.append({**info, "tracked": True})
+
+    return {
+        "catalog_version": CATALOG_VERSION,
+        "previous_version": stored,
+        "orphans": orphans,
+        "version_changed": version_changed,
+    }
+
+
+def get_tracker_state() -> dict[str, Any]:
+    migration = ensure_catalog_migration()
+    tracked = db.get_tracked_parts()
+    tracked_ids = {t["catalog_id"] for t in tracked}
+    by_id = catalog_by_id()
+    active = active_catalog_ids()
+
+    legacy_items = []
+    for t in tracked:
+        cid = t["catalog_id"]
+        if cid not in active and t.get("keep_legacy"):
+            snap = by_id.get(cid) or {
+                "id": cid,
+                "name": t.get("display_name") or cid,
+                "category": t.get("category") or "legacy",
+                "brand": "",
+                "generation": "キープ中（旧世代）",
+                "query": t.get("query") or cid,
+            }
+            legacy_items.append({**snap, "keep_legacy": True})
+
+    latest_prices = db.get_latest_prices(list(tracked_ids))
+    overview = []
+    for t in tracked:
+        if t.get("pending_decision") and not t.get("keep_legacy"):
+            continue
+        cid = t["catalog_id"]
+        meta = by_id.get(cid) or {
+            "id": cid,
+            "name": t.get("display_name") or cid,
+            "category": t.get("category") or "legacy",
+            "brand": "",
+            "generation": "キープ中（旧世代）",
+            "query": t.get("query") or "",
+        }
+        price = latest_prices.get(cid)
+        history = db.get_price_history(cid, limit=12)
+        overview.append(
+            {
+                **meta,
+                "tracked": True,
+                "keep_legacy": bool(t.get("keep_legacy")),
+                "latest_price": price,
+                "history": history,
+                "kakaku_url": _kakaku_url(meta.get("query") or meta.get("name") or cid),
+            }
+        )
+
+    return {
+        "catalog_version": CATALOG_VERSION,
+        "groups": get_catalog_grouped(),
+        "tracked_ids": sorted(tracked_ids - {o["id"] for o in migration["orphans"]}),
+        "overview": overview,
+        "legacy_items": legacy_items,
+        "orphans": migration["orphans"],
+        "last_price_fetch": db.get_meta("last_price_fetch"),
+        "next_due": _next_due(),
+    }
+
+
+def _next_due() -> str | None:
+    last = db.get_meta("last_price_fetch")
+    if not last:
+        return "soon"
+    try:
+        ts = datetime.fromisoformat(last).timestamp()
+        due = ts + WEEK_SEC
+        return datetime.fromtimestamp(due, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def set_tracked(ids: list[str]) -> dict[str, Any]:
+    by_id = catalog_by_id()
+    active = active_catalog_ids()
+    wanted = set(ids)
+    current = {t["catalog_id"]: t for t in db.get_tracked_parts()}
+
+    for cid in list(current.keys()):
+        # Don't drop orphans waiting for decision via this endpoint
+        if current[cid].get("pending_decision") and not current[cid].get("keep_legacy"):
+            continue
+        if cid not in wanted:
+            db.remove_tracked(cid)
+
+    for cid in wanted:
+        meta = by_id.get(cid)
+        if meta and cid in active:
+            db.upsert_tracked(
+                cid,
+                keep_legacy=False,
+                pending_decision=False,
+                display_name=meta["name"],
+                category=meta["category"],
+                query=meta["query"],
+            )
+        elif cid in current and current[cid].get("keep_legacy"):
+            db.upsert_tracked(
+                cid,
+                keep_legacy=True,
+                pending_decision=False,
+                display_name=current[cid].get("display_name"),
+                category=current[cid].get("category"),
+                query=current[cid].get("query"),
+            )
+
+    return get_tracker_state()
+
+
+def resolve_orphans(decisions: dict[str, str]) -> dict[str, Any]:
+    by_id = catalog_by_id()
+    for cid, action in decisions.items():
+        if action == "drop":
+            db.remove_tracked(cid)
+        elif action == "keep":
+            meta = by_id.get(cid) or {}
+            row = next((t for t in db.get_tracked_parts() if t["catalog_id"] == cid), None)
+            db.upsert_tracked(
+                cid,
+                keep_legacy=True,
+                pending_decision=False,
+                display_name=(row or {}).get("display_name") or meta.get("name") or cid,
+                category=(row or {}).get("category") or meta.get("category") or "legacy",
+                query=(row or {}).get("query") or meta.get("query") or cid,
+            )
+    return get_tracker_state()
+
+
+def _kakaku_url(query: str) -> str:
+    return f"https://kakaku.com/search_results/{urllib.parse.quote(query)}/"
+
+
+def _fetch_kakaku_price(query: str) -> dict[str, Any] | None:
+    url = _kakaku_url(query)
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "ja,en;q=0.9",
+    }
+    try:
+        with httpx.Client(timeout=12.0, follow_redirects=True, headers=headers) as client:
+            resp = client.get(url)
+            if resp.status_code >= 400:
+                return None
+            html = resp.text
+            candidates: list[int] = []
+            for pat in (
+                r'p-item_priceNum[^>]*>\s*([0-9]{1,3}(?:,[0-9]{3})+)\s*<',
+                r'class="[^"]*p-item_priceNum[^"]*"[^>]*>\s*([0-9,]+)\s*<',
+                r"createJsonKakaku\([^;]{0,500}?'([0-9]{4,7})','[0-9a-f]{16,}",
+                r">([0-9]{1,3}(?:,[0-9]{3})+)</",
+            ):
+                for m in re.finditer(pat, html, flags=re.I):
+                    try:
+                        val = int(m.group(1).replace(",", ""))
+                    except ValueError:
+                        continue
+                    if 3000 <= val <= 2_000_000:
+                        candidates.append(val)
+                if candidates:
+                    break
+            if not candidates:
+                return {"price_yen": None, "url": url, "source": "kakaku", "note": "価格抽出失敗"}
+            return {
+                "price_yen": min(candidates),
+                "url": url,
+                "source": "kakaku",
+                "note": None,
+            }
+    except Exception as exc:
+        return {"price_yen": None, "url": url, "source": "kakaku", "note": str(exc)}
+
+
+def refresh_prices(force: bool = False) -> dict[str, Any]:
+    last = db.get_meta("last_price_fetch")
+    if not force and last:
+        try:
+            ts = datetime.fromisoformat(last).timestamp()
+            if time.time() - ts < WEEK_SEC:
+                return {
+                    "skipped": True,
+                    "reason": "週次未到来（手動なら「今すぐ価格更新」を使用）",
+                    "last_price_fetch": last,
+                    "state": get_tracker_state(),
+                }
+        except Exception:
+            pass
+
+    by_id = catalog_by_id()
+    tracked = [
+        t
+        for t in db.get_tracked_parts()
+        if not (t.get("pending_decision") and not t.get("keep_legacy"))
+    ]
+    results = []
+    for t in tracked:
+        cid = t["catalog_id"]
+        meta = by_id.get(cid)
+        query = (meta or {}).get("query") or t.get("query") or t.get("display_name") or cid
+        fetched = _fetch_kakaku_price(query) or {}
+        db.add_price_point(
+            cid,
+            price_yen=fetched.get("price_yen"),
+            source=fetched.get("source") or "kakaku",
+            url=fetched.get("url"),
+            note=fetched.get("note"),
+        )
+        results.append({"catalog_id": cid, "query": query, **fetched})
+        time.sleep(0.6)
+
+    db.set_meta("last_price_fetch", _utc_now())
+    return {"skipped": False, "updated": len(results), "results": results, "state": get_tracker_state()}
+
+
+def maybe_weekly_price_job() -> None:
+    tracked = db.get_tracked_parts()
+    if not tracked:
+        return
+    refresh_prices(force=False)

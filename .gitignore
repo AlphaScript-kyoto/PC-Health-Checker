@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+app/data/*.db
+app/data/*.db-*
+app/data/news_image_cache.json
+.pytest_cache/
+*.log
+desktop/node_modules/
+dist-backend/
+build-backend/
+release/
+*.spec
