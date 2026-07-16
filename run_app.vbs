@@ -15,10 +15,18 @@ If Not fso.FolderExists(modules) Then
 End If
 
 If Not fso.FileExists(electron) Then
-  MsgBox "Electron not found. Run npm install in the desktop folder.", 16, "PC Health"
+  MsgBox "Electron が見つかりません。" & vbCrLf & "desktop フォルダで npm install を実行してください。", 16, "PC Health"
   WScript.Quit 1
+End If
+
+' Prefer venv for backend; warn if missing (Electron still starts and shows error UI)
+If Not fso.FileExists(fso.BuildPath(root, ".venv\Scripts\pythonw.exe")) And _
+   Not fso.FileExists(fso.BuildPath(root, ".venv\Scripts\python.exe")) Then
+  MsgBox "Python 仮想環境 (.venv) が見つかりません。" & vbCrLf & _
+         "初回は README のセットアップ後に再実行してください。", 48, "PC Health"
 End If
 
 sh.CurrentDirectory = desktop
 cmd = Chr(34) & electron & Chr(34) & " " & Chr(34) & desktop & Chr(34)
+' 0 = hidden console; False = don't wait (second click focuses existing window)
 sh.Run cmd, 0, False

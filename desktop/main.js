@@ -20,14 +20,14 @@ function pythonPath() {
     const packaged = path.join(process.resourcesPath, "backend", "pc-health-backend.exe");
     if (fs.existsSync(packaged)) return packaged;
   }
-  // Dev fallback beside repo
-  const localBackend = path.join(ROOT, "dist-backend", "pc-health-backend", "pc-health-backend.exe");
-  if (fs.existsSync(localBackend)) return localBackend;
-
+  // Dev: prefer live Python so UI/catalog edits apply without rebuilding the exe
   const pythonw = path.join(ROOT, ".venv", "Scripts", "pythonw.exe");
   if (fs.existsSync(pythonw)) return pythonw;
   const win = path.join(ROOT, ".venv", "Scripts", "python.exe");
   if (fs.existsSync(win)) return win;
+
+  const localBackend = path.join(ROOT, "dist-backend", "pc-health-backend", "pc-health-backend.exe");
+  if (fs.existsSync(localBackend)) return localBackend;
   return "pythonw";
 }
 
@@ -39,16 +39,37 @@ function backendArgs() {
   return [path.join(ROOT, "app", "main.py"), "--headless"];
 }
 
+function backendLogPath() {
+  const base = app.isPackaged
+    ? path.join(process.env.LOCALAPPDATA || ROOT, "PCHealth")
+    : path.join(ROOT, "app", "data");
+  try {
+    fs.mkdirSync(base, { recursive: true });
+  } catch (_) {}
+  return path.join(base, "backend-launch.log");
+}
+
 function startBackend() {
   const py = pythonPath();
   const args = backendArgs();
   const cwd = app.isPackaged
     ? path.join(process.resourcesPath, "backend")
     : ROOT;
+  const logFile = backendLogPath();
+  let logFd = "ignore";
+  try {
+    logFd = fs.openSync(logFile, "a");
+    fs.writeSync(
+      logFd,
+      `\n[${new Date().toISOString()}] spawn ${py} ${args.join(" ")}\n`
+    );
+  } catch (_) {
+    logFd = "ignore";
+  }
   pyProc = spawn(py, args, {
     cwd,
     windowsHide: true,
-    stdio: "ignore",
+    stdio: ["ignore", logFd, logFd],
     detached: false,
     env: { ...process.env, PYTHONUTF8: "1" },
   });
@@ -133,7 +154,7 @@ function createWindow() {
     title: "PC Health",
     backgroundColor: "#f5f5f7",
     autoHideMenuBar: true,
-    show: false,
+    show: true,
     icon: path.join(__dirname, "icon.png"),
     webPreferences: {
       contextIsolation: true,
@@ -142,12 +163,25 @@ function createWindow() {
     },
   });
 
-  mainWindow.once("ready-to-show", () => mainWindow.show());
-  // bust Chromium HTTP cache so UI updates (hero placement etc.) always apply
   const bust = Date.now();
-  mainWindow.webContents.session.clearCache().finally(() => {
-    mainWindow.loadURL(`${BASE}/?v=${bust}`);
+  const loadDashboard = () => {
+    mainWindow.loadURL(`${BASE}/?v=${bust}`).catch(() => {});
+  };
+
+  mainWindow.webContents.on("did-fail-load", (_e, code, desc) => {
+    const msg = `バックエンドに接続できませんでした (${code}: ${desc}).<br/>
+      少し待ってから再試行します…<br/>
+      <button onclick="location.reload()">再読み込み</button>`;
+    mainWindow.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(
+        `<!doctype html><html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#f5f5f7;color:#1d1d1f">
+        <h1>PC Health</h1><p>${msg}</p></body></html>`
+      )}`
+    );
+    setTimeout(loadDashboard, 2000);
   });
+
+  mainWindow.webContents.session.clearCache().finally(loadDashboard);
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("pchealth://elevate")) {
@@ -231,20 +265,30 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
+    createTray();
+    createWindow();
     startBackend();
     try {
-      await waitForServer();
+      await waitForServer(45000);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const bust = Date.now();
+        mainWindow.loadURL(`${BASE}/?v=${bust}`).catch(() => {});
+        mainWindow.show();
+        mainWindow.focus();
+      }
     } catch (err) {
       console.error(err);
       if (Notification.isSupported()) {
         new Notification({
           title: "PC Health",
-          body: "バックエンドの起動に失敗しました。Python環境を確認してください。",
+          body: "バックエンドの起動に失敗しました。.venv や Python 環境を確認してください。",
         }).show();
       }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
     }
-    createWindow();
-    createTray();
   });
 
   app.on("before-quit", () => {
