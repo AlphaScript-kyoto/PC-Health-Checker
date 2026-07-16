@@ -90,6 +90,30 @@ def _memory_summary(modules: Any) -> str | None:
     return " ".join(parts)
 
 
+def _gpu_summary(gpus: Any) -> str | None:
+    """e.g. 'AMD Radeon RX 9070 XT（VRAM 16GB）'; joins multiple GPUs with ' / '."""
+    if not gpus:
+        return None
+    if isinstance(gpus, dict):
+        gpus = [gpus]
+    parts: list[str] = []
+    for g in gpus:
+        name = (g.get("Name") or "").strip()
+        if not name:
+            continue
+        try:
+            vram = int(g.get("VramBytes") or 0)
+        except (TypeError, ValueError):
+            vram = 0
+        if vram > 0:
+            gb = vram / (1024**3)
+            gb_txt = f"{gb:.0f}" if gb >= 1 else f"{gb:.1f}"
+            parts.append(f"{name}（VRAM {gb_txt}GB）")
+        else:
+            parts.append(name)
+    return " / ".join(parts) if parts else None
+
+
 def collect_inventory() -> dict[str, Any]:
     script = r"""
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
@@ -103,6 +127,20 @@ $dimms = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object {
     SMBIOSMemoryType = $_.SMBIOSMemoryType
   }
 })
+# Registry holds the real VRAM size (AdapterRAM is a 32bit value and caps at 4GB)
+$vramByDesc = @{}
+Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*' -ErrorAction SilentlyContinue | ForEach-Object {
+  $qw = $_.'HardwareInformation.qwMemorySize'
+  if ($qw -and $_.DriverDesc) { $vramByDesc[$_.DriverDesc] = [int64]$qw }
+}
+$gpus = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_.Name -notmatch 'Microsoft Basic|Remote Display|Virtual' } | ForEach-Object {
+  $vram = $vramByDesc[$_.Name]
+  if (-not $vram) { $vram = [int64]$_.AdapterRAM }
+  [PSCustomObject]@{
+    Name = $_.Name
+    VramBytes = $vram
+  }
+})
 [PSCustomObject]@{
   CpuName = $cpu.Name
   Cores = $cpu.NumberOfCores
@@ -112,6 +150,7 @@ $dimms = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object {
   Model = $cs.Model
   TotalMemoryBytes = [int64]$cs.TotalPhysicalMemory
   MemoryModules = $dimms
+  Gpus = $gpus
   OsCaption = $os.Caption
   OsVersion = $os.Version
 } | ConvertTo-Json -Compress -Depth 4
@@ -130,6 +169,7 @@ $dimms = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object {
         "total_memory_gb": round((data.get("TotalMemoryBytes") or mem.total) / (1024**3), 1),
         "memory_used_pct": mem.percent,
         "memory_summary": _memory_summary(data.get("MemoryModules")),
+        "gpu_summary": _gpu_summary(data.get("Gpus")),
         "os_caption": data.get("OsCaption"),
         "os_version": data.get("OsVersion"),
     }

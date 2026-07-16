@@ -197,6 +197,7 @@ function renderInventory(inv) {
     <div class="card">
       <div class="row"><span>ホスト</span><strong>${inv.hostname || "-"}</strong></div>
       <div class="row"><span>CPU</span><strong>${inv.cpu_name || "-"}</strong></div>
+      ${inv.gpu_summary ? `<div class="row"><span>GPU</span><strong>${inv.gpu_summary}</strong></div>` : ""}
       <div class="row"><span>メモリ</span><strong>${inv.total_memory_gb ?? "-"} GB（使用 ${inv.memory_used_pct ?? "-"}%）${inv.memory_summary ? `<span class="mem-detail">${inv.memory_summary}</span>` : ""}</strong></div>
       <div class="row"><span>機種</span><strong>${inv.manufacturer || ""} ${inv.model || ""}</strong></div>
       <div class="row"><span>OS</span><strong>${inv.os_caption || inv.platform || "-"}</strong></div>
