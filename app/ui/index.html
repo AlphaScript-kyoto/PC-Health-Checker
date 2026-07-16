@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=20260716j" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260716k" />
 </head>
 <body>
   <div class="shell">
@@ -67,18 +67,28 @@
         </section>
 
         <section id="tab-reco" class="panel">
-          <p class="section-note">自動購入はしません。相場の目安とショップへのリンクだけ用意します。</p>
+          <p class="section-note">商品の自動購入機能はありません。相場の目安とショップへのリンクだけ用意します。</p>
           <div id="recommendations" class="stack"></div>
         </section>
 
         <section id="tab-prices" class="panel">
           <div class="news-toolbar">
-            <p class="section-note">チェックしたパーツを週次で記録：価格.comは最安、Amazonは新品出品の平均価格。各カードでKeepaの過去1年の価格推移グラフも開けます。自動購入はしません。</p>
+            <p class="section-note">チェックしたパーツを週次で記録：価格.comは最安、Amazonは新品出品の平均価格。各カードでKeepaの過去1年の価格推移グラフも開けます。商品の自動購入機能はありません。</p>
             <div class="price-actions">
               <button type="button" id="btnPriceRefresh" class="btn-ghost">今すぐ価格更新</button>
               <button type="button" id="btnPriceSave" class="btn-primary">選択を保存</button>
             </div>
           </div>
+          <details class="price-caveats">
+            <summary>価格取得の既知の不具合・注意点</summary>
+            <ul>
+              <li>Amazonに短時間で連続アクセスすると一時的にブロックされ、「Amazon価格抽出失敗」や取得漏れが起きることがあります（時間を置いて「今すぐ価格更新」で回復します）。</li>
+              <li>価格は検索結果ベースの参考値です。検索語によっては別商品やアクセサリの価格が混ざることがあります（外れ値は自動で除外しています）。</li>
+              <li>Amazonの価格は「検索上位の新品出品の平均」で、実際のカート価格と異なる場合があります。</li>
+              <li>Keepaグラフは検索結果の先頭商品のものを表示するため、意図と違う商品のグラフになることがあります（グラフ上部の商品名で確認できます）。</li>
+              <li>価格.com・Amazonのページ構成が変わると取得できなくなる場合があります。</li>
+            </ul>
+          </details>
           <div id="orphanBox" class="orphan-box" hidden></div>
           <p class="tiny" id="priceMeta"></p>
           <div id="priceOverview" class="price-overview"></div>
@@ -157,6 +167,6 @@
       </main>
     </div>
   </div>
-  <script src="/static/app.js?v=20260716j"></script>
+  <script src="/static/app.js?v=20260716k"></script>
 </body>
 </html>

@@ -217,7 +217,7 @@ def build_recommendations(
                     meta["media"], meta["capacity_label"], meta["budget_max_yen"]
                 ),
                 "candidates": candidates,
-                "disclaimer": "自動購入はしません。リンク先で状態・保証・価格を必ず確認してください。",
+                "disclaimer": "商品の自動購入機能はありません。リンク先で状態・保証・価格を必ず確認してください。",
             }
         )
 
