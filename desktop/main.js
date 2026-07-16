@@ -126,23 +126,42 @@ function trayIcon() {
 }
 
 function relaunchElevated() {
+  // Dev: execPath is electron.exe — must pass the app folder as argv.
+  // Packaged: execPath is PC Health.exe / portable host.
   const exe = process.execPath;
-  const escaped = exe.replace(/'/g, "''");
-  const child = spawn(
-    "powershell.exe",
-    [
-      "-NoProfile",
-      "-WindowStyle",
-      "Hidden",
-      "-Command",
-      `Start-Process -FilePath '${escaped}' -Verb RunAs`,
-    ],
-    { detached: true, stdio: "ignore", windowsHide: true }
-  );
-  child.unref();
+  const appArgs = app.isPackaged ? [] : [__dirname];
+  const exeEsc = exe.replace(/'/g, "''");
+  const argsEsc = appArgs.map((a) => `'${String(a).replace(/'/g, "''")}'`).join(", ");
+  const argClause = appArgs.length ? ` -ArgumentList @(${argsEsc})` : "";
+  const workDir = app.isPackaged
+    ? path.dirname(exe).replace(/'/g, "''")
+    : __dirname.replace(/'/g, "''");
+
+  // Important: release the single-instance lock and quit BEFORE the elevated
+  // process claims it. Otherwise the new admin instance exits immediately.
   quitting = true;
   stopBackend();
-  setTimeout(() => app.quit(), 400);
+  try {
+    app.releaseSingleInstanceLock();
+  } catch (_) {}
+
+  const ps = `
+$ErrorActionPreference = 'Stop'
+Start-Sleep -Milliseconds 900
+try {
+  Start-Process -FilePath '${exeEsc}'${argClause} -WorkingDirectory '${workDir}' -Verb RunAs
+} catch {
+  # UAC cancelled or elevation failed — relaunch without admin so the app is not gone
+  Start-Process -FilePath '${exeEsc}'${argClause} -WorkingDirectory '${workDir}'
+}
+`;
+  spawn(
+    "powershell.exe",
+    ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+    { detached: true, stdio: "ignore", windowsHide: true }
+  ).unref();
+
+  app.quit();
 }
 
 function createWindow() {
