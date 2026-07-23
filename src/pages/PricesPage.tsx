@@ -24,6 +24,21 @@ function asCatalogGroups(groups: PricesPayload['groups']): PriceCatalogGroup[] {
   }))
 }
 
+/** 価格更新APIが state ネストで返す旧形式にも耐える */
+function normalizePricesPayload(payload: PricesPayload & { state?: PricesPayload }): PricesPayload {
+  if (payload?.groups || payload?.overview) return payload
+  const nested = payload?.state
+  if (nested && (nested.groups || nested.overview || nested.tracked_ids)) {
+    return {
+      ...nested,
+      skipped: payload.skipped ?? nested.skipped,
+      reason: payload.reason ?? nested.reason,
+      updated: payload.updated ?? nested.updated,
+    }
+  }
+  return payload
+}
+
 function amdPlatform(item: PricePart): string {
   const generation = String(item.generation || '')
   if (generation.includes('5000')) return 'AM4'
@@ -47,7 +62,7 @@ export function PricesPage({ showToast }: Props) {
     setLoading(true)
     setError(null)
     try {
-      const payload = await getPrices()
+      const payload = normalizePricesPayload(await getPrices())
       setData(payload)
       setTracked(new Set(payload.tracked_ids || []))
       const groups = asCatalogGroups(payload.groups)
@@ -107,7 +122,7 @@ export function PricesPage({ showToast }: Props) {
   const saveTracked = async () => {
     setSaving(true)
     try {
-      const payload = await putTracked([...tracked])
+      const payload = normalizePricesPayload(await putTracked([...tracked]))
       setData(payload)
       setTracked(new Set(payload.tracked_ids || []))
       showToast('追跡リストを保存しました')
@@ -122,13 +137,34 @@ export function PricesPage({ showToast }: Props) {
   const refresh = async () => {
     setRefreshing(true)
     try {
-      const payload = await postPriceRefresh(true)
+      const raw = await postPriceRefresh(true)
+      const payload = normalizePricesPayload(raw)
       setData(payload)
-      setTracked(new Set(payload.tracked_ids || []))
-      showToast('価格を更新しました')
+      // tracked_ids が欠けるレスポンスでも、今の選択を空にしない
+      if (Array.isArray(payload.tracked_ids)) {
+        setTracked(new Set(payload.tracked_ids))
+      }
+      const updated = typeof raw.updated === 'number' ? raw.updated : undefined
+      showToast(
+        raw.skipped
+          ? `更新をスキップしました（${raw.reason || '週次未到来'}）`
+          : updated != null
+            ? `価格を更新しました（${updated} 件）`
+            : '価格を更新しました',
+      )
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       showToast(`価格更新に失敗: ${message}`)
+      // 失敗時は最新状態を取り直す
+      try {
+        const payload = normalizePricesPayload(await getPrices())
+        setData(payload)
+        if (Array.isArray(payload.tracked_ids)) {
+          setTracked(new Set(payload.tracked_ids))
+        }
+      } catch {
+        // ignore
+      }
     } finally {
       setRefreshing(false)
     }
@@ -136,7 +172,7 @@ export function PricesPage({ showToast }: Props) {
 
   const resolveOrphan = async (id: string, decision: 'keep' | 'drop') => {
     try {
-      const payload = await postOrphans({ [id]: decision })
+      const payload = normalizePricesPayload(await postOrphans({ [id]: decision }))
       setData(payload)
       setTracked(new Set(payload.tracked_ids || []))
       showToast(decision === 'keep' ? '旧パーツをキープしました' : '旧パーツを外しました')
@@ -258,17 +294,17 @@ export function PricesPage({ showToast }: Props) {
             まだ追跡中のパーツがありません。下のカタログから選んで保存してください。
           </p>
         ) : (
-          <div className="stack" style={{ marginTop: 8 }}>
+          <div className="tracked-item-grid">
             {(data?.overview || []).map((item: PricePart) => (
-              <div className="list-row" key={item.id}>
-                <div>
+              <article className="tracked-item" key={item.id}>
+                <div className="tracked-item-text">
                   <strong>{item.name}</strong>
-                  <p className="muted" style={{ margin: '4px 0 0' }}>
-                    価格.com {formatYen(item.latest_kakaku?.price_yen)} · Amazon{' '}
-                    {formatYen(item.latest_amazon?.price_yen)}
-                  </p>
+                  <span className="muted">
+                    価格.com {formatYen(item.latest_kakaku?.price_yen)}
+                  </span>
+                  <span className="muted">Amazon {formatYen(item.latest_amazon?.price_yen)}</span>
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div className="tracked-item-actions">
                   {item.kakaku_url && (
                     <a className="btn ghost" href={item.kakaku_url} target="_blank" rel="noreferrer">
                       価格.com
@@ -280,7 +316,7 @@ export function PricesPage({ showToast }: Props) {
                     </a>
                   )}
                 </div>
-              </div>
+              </article>
             ))}
           </div>
         )}

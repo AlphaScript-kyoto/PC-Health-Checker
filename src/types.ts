@@ -271,6 +271,11 @@ export interface PricesPayload {
   orphans?: PricePart[]
   last_price_fetch?: string | null
   next_due?: string | null
+  /** 価格更新APIの付加情報 */
+  skipped?: boolean
+  reason?: string
+  updated?: number
+  state?: PricesPayload
 }
 
 export interface DriveInfo {

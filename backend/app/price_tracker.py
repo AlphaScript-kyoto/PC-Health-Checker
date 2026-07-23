@@ -382,11 +382,12 @@ def refresh_prices(force: bool = False) -> dict[str, Any]:
         try:
             ts = datetime.fromisoformat(last).timestamp()
             if time.time() - ts < WEEK_SEC:
+                state = get_tracker_state()
                 return {
+                    **state,
                     "skipped": True,
                     "reason": "週次未到来（手動なら「今すぐ価格更新」を使用）",
-                    "last_price_fetch": last,
-                    "state": get_tracker_state(),
+                    "updated": 0,
                 }
         except Exception:
             pass
@@ -419,7 +420,14 @@ def refresh_prices(force: bool = False) -> dict[str, Any]:
         time.sleep(1.0)
 
     db.set_meta("last_price_fetch", _utc_now())
-    return {"skipped": False, "updated": len(results), "results": results, "state": get_tracker_state()}
+    # UI は /api/prices と同じ形を期待する（state ネストだとカタログが消えて見える）
+    state = get_tracker_state()
+    return {
+        **state,
+        "skipped": False,
+        "updated": len(results),
+        "results": results,
+    }
 
 
 def maybe_weekly_price_job() -> None:
