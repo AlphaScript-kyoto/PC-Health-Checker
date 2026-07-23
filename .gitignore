@@ -9,6 +9,7 @@ backend/app/data
 .release
 dist-backend
 build-backend
+release
 .env
 .env.*
 *.log
