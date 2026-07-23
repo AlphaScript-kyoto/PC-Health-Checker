@@ -19,8 +19,45 @@
 .tm-cell rect { stroke: rgba(255,255,255,.65); stroke-width: 1.5; }
 .tm-cell.is-selected rect { stroke: var(--ink); stroke-width: 3; }
 .tm-label {
-  height: 100%; padding: 10px 12px; display: flex; flex-direction: column; justify-content: flex-end;
-  gap: 2px; color: var(--ink); pointer-events: none; overflow: hidden;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: flex-start;
+  gap: 2px;
+  color: var(--ink);
+  pointer-events: none;
+  overflow: hidden;
 }
-.tm-label strong { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tm-label span { font-size: 12px; opacity: .8; }
+.tm-label.is-compact {
+  justify-content: center;
+  padding: 2px 4px;
+}
+.tm-label strong {
+  display: block;
+  max-width: 100%;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tm-label span {
+  display: block;
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.25;
+  opacity: .85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tm-label.is-compact span {
+  font-size: 11px;
+}

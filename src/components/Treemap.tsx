@@ -108,7 +108,12 @@ export function Treemap({ root, rootLabel, selectedPath, onSelect }: Props) {
           {cells.map((c) => {
             const w = c.x1 - c.x0
             const h = c.y1 - c.y0
-            const label = w > 72 && h > 40
+            // 角丸・余白を考慮して、十分な高さのときだけ2行表示（短いと名前が見切れる）
+            const showBoth = w >= 78 && h >= 56
+            const showSizeOnly = !showBoth && w >= 56 && h >= 30
+            const inset = 6
+            const foW = Math.max(0, w - inset * 2)
+            const foH = Math.max(0, h - inset * 2)
             return (
               <g
                 key={c.node.path}
@@ -119,10 +124,10 @@ export function Treemap({ root, rootLabel, selectedPath, onSelect }: Props) {
               >
                 <title>{`${c.node.name}\n${formatBytes(c.node.size)}`}</title>
                 <rect width={w} height={h} rx={11} fill={fillFor(c.node.safety)} />
-                {label && (
-                  <foreignObject width={w} height={h}>
-                    <div className="tm-label">
-                      <strong>{c.node.name}</strong>
+                {(showBoth || showSizeOnly) && foW > 0 && foH > 0 && (
+                  <foreignObject x={inset} y={inset} width={foW} height={foH}>
+                    <div className={`tm-label ${showSizeOnly ? 'is-compact' : ''}`}>
+                      {showBoth && <strong>{c.node.name}</strong>}
                       <span>{formatBytes(c.node.size)}</span>
                     </div>
                   </foreignObject>
