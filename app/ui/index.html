@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>PC Health</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260723a" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div>
+          <p class="brand">PC Health</p>
+          <p class="brand-sub">Storage &amp; Care</p>
+        </div>
+      </div>
+      <nav class="nav" aria-label="メイン">
+        <button type="button" data-tab="home" class="nav-btn active">ホーム</button>
+        <button type="button" data-tab="disks" class="nav-btn">ディスク</button>
+        <button type="button" data-tab="reco" class="nav-btn">提案</button>
+        <button type="button" data-tab="prices" class="nav-btn">価格</button>
+        <button type="button" data-tab="news" class="nav-btn">ニュース</button>
+        <button type="button" data-tab="settings" class="nav-btn">設定</button>
+      </nav>
+      <div class="sidebar-foot">
+        <button id="btnScan" type="button" class="btn-primary">今すぐスキャン</button>
+        <p class="tiny" id="scannedAt"></p>
+      </div>
+    </aside>
+
+    <div class="content">
+      <main>
+        <section id="tab-home" class="panel active">
+          <header class="hero" id="homeHero">
+            <p class="eyebrow">システム状態</p>
+            <h1 id="overall">確認中…</h1>
+            <p class="lede" id="heroHint">ディスクと空き容量を見守っています。</p>
+          </header>
+          <div class="grid two">
+            <section class="block">
+              <h2>このPC</h2>
+              <div id="inventory" class="stack"></div>
+            </section>
+            <section class="block">
+              <h2>いま気になること</h2>
+              <div id="issues" class="stack"></div>
+            </section>
+          </div>
+          <section class="block">
+            <h2>最近の通知</h2>
+            <div id="alerts" class="stack"></div>
+          </section>
+        </section>
+
+        <section id="tab-disks" class="panel">
+          <p class="section-note">SMART詳細と通電時間。属性テーブルは各ドライブから開けます。</p>
+          <div id="elevationBanner" class="elevation-banner" hidden></div>
+          <div id="disks" class="stack"></div>
+        </section>
+
+        <section id="tab-reco" class="panel">
+          <p class="section-note">商品の自動購入機能はありません。相場の目安とショップへのリンクだけ用意します。</p>
+          <div id="recommendations" class="stack"></div>
+        </section>
+
+        <section id="tab-prices" class="panel">
+          <div class="news-toolbar">
+            <p class="section-note">チェックしたパーツを週次で記録：価格.comは検索最安の目安、Amazonは検索上位の新品出品の平均価格。価格更新で商品が特定できたカードでは、Keepaの過去1年グラフも表示します。商品の自動購入機能はありません。</p>
+            <div class="price-actions">
+              <button type="button" id="btnPriceRefresh" class="btn-ghost">今すぐ価格更新</button>
+              <button type="button" id="btnPriceSave" class="btn-primary">選択を保存</button>
+            </div>
+          </div>
+          <details class="price-caveats">
+            <summary>価格取得の既知の不具合・注意点</summary>
+            <ul>
+              <li>Amazonに短時間で連続アクセスすると一時的にブロックされ、「Amazon価格抽出失敗」や取得漏れが起きることがあります（時間を置いて「今すぐ価格更新」で回復します）。</li>
+              <li>価格は検索結果ベースの参考値です。検索語によっては別商品やアクセサリの価格が混ざることがあります（外れ値は自動で除外しています）。</li>
+              <li>Amazonの価格は「検索上位の新品出品の平均」で、実際のカート価格と異なる場合があります。</li>
+              <li>Keepaグラフは検索結果の先頭商品のものを表示するため、意図と違う商品のグラフになることがあります（グラフ上部の商品名で確認できます）。</li>
+              <li>価格.com・Amazonのページ構成が変わると取得できなくなる場合があります。</li>
+            </ul>
+          </details>
+          <div id="orphanBox" class="orphan-box" hidden></div>
+          <p class="tiny" id="priceMeta"></p>
+          <div id="priceOverview" class="price-overview"></div>
+          <h2 class="block-title">トラッキング対象（複数選択）</h2>
+          <div id="priceCatalog" class="price-catalog"></div>
+        </section>
+
+        <section id="tab-news" class="panel">
+          <div class="news-toolbar">
+            <p class="section-note">PCパーツ・ハードウェア関連の公開ニュース（RSS）です。記事本体は各サイトでご覧ください。</p>
+            <button type="button" id="btnNewsRefresh" class="btn-ghost">最新を取得</button>
+          </div>
+          <div id="news" class="stack"></div>
+        </section>
+
+        <section id="tab-settings" class="panel">
+          <form id="settingsForm" class="form surface">
+            <div class="form-row">
+              <label class="toggle"><span>通知</span><input type="checkbox" name="notify_enabled" /></label>
+              <label class="toggle"><span>Windows起動時に起動</span><input type="checkbox" name="startup_enabled" /></label>
+            </div>
+            <div class="form-grid">
+              <label><span>空き容量 警告 (%)</span>
+                <input type="number" name="capacity_warn_pct" step="0.5" min="1" max="50" />
+              </label>
+              <label><span>空き容量 危険 (%)</span>
+                <input type="number" name="capacity_critical_pct" step="0.5" min="0.5" max="30" />
+              </label>
+              <label><span>予算上限 (円)</span>
+                <input type="number" name="budget_max_yen" step="1000" min="1000" />
+              </label>
+              <label><span>毎日の自動スキャン時刻</span>
+                <input type="time" name="daily_scan_time" required />
+              </label>
+              <label><span>新品 / 中古</span>
+                <select name="prefer_new_used">
+                  <option value="either">どちらでも</option>
+                  <option value="new">新品優先</option>
+                  <option value="used">中古も可</option>
+                </select>
+              </label>
+              <label><span>希望メディア</span>
+                <select name="prefer_media">
+                  <option value="ssd">SSD</option>
+                  <option value="hdd">HDD</option>
+                  <option value="either">どちらでも</option>
+                </select>
+              </label>
+              <label><span>希望容量</span>
+                <select name="capacity_preference_tb">
+                  <option value="0.5">512GB</option>
+                  <option value="1">1TB</option>
+                  <option value="2">2TB</option>
+                  <option value="4">4TB</option>
+                  <option value="8">8TB</option>
+                  <option value="16">16TB</option>
+                </select>
+              </label>
+              <label><span>優先事項</span>
+                <select name="priority">
+                  <option value="speed">速度</option>
+                  <option value="quiet">静音</option>
+                  <option value="capacity">容量</option>
+                  <option value="price">価格</option>
+                </select>
+              </label>
+            </div>
+            <button type="submit" class="btn-primary">設定を保存</button>
+            <p id="settingsMsg" class="tiny"></p>
+          </form>
+          <aside class="about-card surface" id="aboutCard" style="margin-top:18px; max-width:760px;">
+            <h2 class="block-title" style="margin-top:0">このアプリについて</h2>
+            <div id="aboutBody" class="tiny">読み込み中…</div>
+          </aside>
+        </section>
+      </main>
+    </div>
+  </div>
+  <script src="/static/app.js?v=20260723a"></script>
+</body>
+</html>

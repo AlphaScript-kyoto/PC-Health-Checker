@@ -1,0 +1,53 @@
+{
+  "name": "pc-health",
+  "version": "0.2.4",
+  "private": true,
+  "description": "PC Health by Alpha Script",
+  "main": "main.js",
+  "author": {
+    "name": "Alpha Script",
+    "url": "https://alphascript-kyoto.github.io/as-homepage/"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "jp.alphascript.pchealth",
+    "productName": "PC Health",
+    "copyright": "Copyright © Alpha Script",
+    "directories": {
+      "output": "../release"
+    },
+    "files": [
+      "main.js",
+      "icon.png",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist-backend/pc-health-backend/",
+        "to": "backend",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "icon.png",
+      "artifactName": "PCHealth-${version}-portable.exe"
+    },
+    "portable": {
+      "artifactName": "PCHealth-${version}-portable.exe"
+    }
+  }
+}
