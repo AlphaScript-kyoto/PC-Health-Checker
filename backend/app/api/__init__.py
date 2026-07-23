@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from app import db
 from app.scanner import get_last_scan, get_scan_progress, run_scan, start_scan
 
-app = FastAPI(title="PC Health Checker", docs_url="/api/docs")
+app = FastAPI(title="パソコンちぇっ君", docs_url="/api/docs")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

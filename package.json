@@ -1,7 +1,7 @@
 {
   "name": "pc-health-checker",
   "version": "0.1.0",
-  "description": "PCの健康チェッカー — ディスク健全性・容量マップ・買い替え提案",
+  "description": "パソコンちぇっ君 — ディスク健全性・容量マップ・買い替え提案",
   "main": "dist-electron/main.js",
   "private": true,
   "scripts": {
@@ -13,7 +13,7 @@
   },
   "build": {
     "appId": "jp.alphascript.pc-health-checker",
-    "productName": "PCの健康チェッカー",
+    "productName": "パソコンちぇっ君",
     "directories": {
       "output": "release",
       "buildResources": "build"

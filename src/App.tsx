@@ -139,7 +139,7 @@ export default function App() {
     <div className="shell">
       <aside className="side-nav">
         <div className="side-brand">
-          <p className="side-brand-mark">PCの健康チェッカー</p>
+          <p className="side-brand-mark">パソコンちぇっ君</p>
           <p className="side-brand-sub">ディスクと容量を、やさしく見守る</p>
         </div>
         <nav className="nav-list" aria-label="メインメニュー">
@@ -159,7 +159,7 @@ export default function App() {
       <div className="main-column">
         <header className="top-bar">
           <div className="top-bar-brand">
-            <h1>PCの健康チェッカー</h1>
+            <h1>パソコンちぇっ君</h1>
             <p>ローカルだけで動く、PCの健康診断</p>
           </div>
           <div className="top-bar-actions">

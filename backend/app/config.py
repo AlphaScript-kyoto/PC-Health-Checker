@@ -21,8 +21,8 @@ def _data_dir() -> Path:
     return _app_dir() / "data"
 
 
-APP_NAME = "PCの健康チェッカー"
-APP_NAME_EN = "PC Health Checker"
+APP_NAME = "パソコンちぇっ君"
+APP_NAME_EN = "Pasokon Chekkun"
 APP_VERSION = "0.1.0"
 APP_AUTHOR = "Alpha Script"
 APP_HOMEPAGE = "https://alphascript-kyoto.github.io/as-homepage/"

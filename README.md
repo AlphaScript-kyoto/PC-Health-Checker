@@ -1,6 +1,7 @@
-# PCの健康チェッカー（PC Health Checker）
+# パソコンちぇっ君（Pasokon Chekkun）
 
 ディスクの健全性（SMART）・空き容量・容量マップ・買い替え提案・価格ウォッチ・ニュースをひとつのデスクトップアプリで見守ります。  
+旧称: PCの健康チェッカー  
 制作者: [Alpha Script](https://alphascript-kyoto.github.io/as-homepage/)  
 リポジトリ: https://github.com/AlphaScript-kyoto/PC-Health-Checker
 

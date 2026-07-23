@@ -21,7 +21,7 @@ const execFileAsync = promisify(execFile)
 const HOST = '127.0.0.1'
 const PORT = 8787
 const BASE = `http://${HOST}:${PORT}`
-const APP_TITLE = 'PCの健康チェッカー'
+const APP_TITLE = 'パソコンちぇっ君'
 const VITE_ARG_PREFIX = '--pchc-vite='
 
 /** 通常起動と管理者起動で Temp が違うことがあるため、LOCALAPPDATA に置く */
@@ -626,7 +626,7 @@ async function loadRenderer(win: BrowserWindow) {
     '画面の読み込みに失敗しました。ターミナルで npm run dev が動いているか確認して、もう一度開き直してください。'
   await win.loadURL(
     `data:text/html;charset=utf-8,${encodeURIComponent(
-      `<!doctype html><html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#eef3f7;color:#1c2430"><h2>PCの健康チェッカー</h2><p>${message}</p></body></html>`,
+      `<!doctype html><html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#eef3f7;color:#1c2430"><h2>パソコンちぇっ君</h2><p>${message}</p></body></html>`,
     )}`,
   )
 }
