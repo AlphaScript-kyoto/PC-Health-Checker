@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getAbout, postScan } from './api'
+import { PageErrorBoundary } from './components/PageErrorBoundary'
 import { Toast } from './components/Toast'
 import { DisksPage } from './pages/DisksPage'
 import { HomePage } from './pages/HomePage'
@@ -160,22 +161,27 @@ export default function App() {
         </header>
 
         <main className="page-area" key={`${tab}-${refreshKey}`}>
-          {tab === 'home' && (
-            <HomePage
-              onOpenSpace={goSpace}
-              onOpenRecommendations={goRecommendations}
-              showToast={showToast}
-              processElevated={elevated}
-            />
-          )}
-          {tab === 'disks' && <DisksPage onOpenSpace={goSpace} showToast={showToast} />}
-          {tab === 'space' && (
-            <SpacePage initialDrive={deepLinkDrive} showToast={showToast} />
-          )}
-          {tab === 'recommendations' && <RecommendationsPage showToast={showToast} />}
-          {tab === 'prices' && <PricesPage showToast={showToast} />}
-          {tab === 'news' && <NewsPage showToast={showToast} />}
-          {tab === 'settings' && <SettingsPage showToast={showToast} />}
+          <PageErrorBoundary
+            fallbackTitle="画面の表示に失敗しました"
+            onRetry={() => setRefreshKey((k) => k + 1)}
+          >
+            {tab === 'home' && (
+              <HomePage
+                onOpenSpace={goSpace}
+                onOpenRecommendations={goRecommendations}
+                showToast={showToast}
+                processElevated={elevated}
+              />
+            )}
+            {tab === 'disks' && <DisksPage onOpenSpace={goSpace} showToast={showToast} />}
+            {tab === 'space' && (
+              <SpacePage initialDrive={deepLinkDrive} showToast={showToast} />
+            )}
+            {tab === 'recommendations' && <RecommendationsPage showToast={showToast} />}
+            {tab === 'prices' && <PricesPage showToast={showToast} />}
+            {tab === 'news' && <NewsPage showToast={showToast} />}
+            {tab === 'settings' && <SettingsPage showToast={showToast} />}
+          </PageErrorBoundary>
         </main>
       </div>
 

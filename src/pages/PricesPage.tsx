@@ -1,10 +1,34 @@
 import { useEffect, useMemo, useState } from 'react'
 import { getPrices, postOrphans, postPriceRefresh, putTracked } from '../api'
 import { formatYen } from '../lib/format'
-import type { PricePart, PricesPayload } from '../types'
+import type { PriceCatalogGroup, PricePart, PricesPayload } from '../types'
 
 interface Props {
   showToast: (message: string) => void
+}
+
+function flattenCatalog(groups: PricesPayload['groups']): PricePart[] {
+  if (!groups) return []
+
+  // 新形式: [{ category, items, brands }, ...]
+  if (Array.isArray(groups)) {
+    return groups.flatMap((group: PriceCatalogGroup) => {
+      const items = Array.isArray(group.items) ? group.items : []
+      return items.map((item) => ({
+        ...item,
+        category: item.category || group.category || group.label,
+      }))
+    })
+  }
+
+  // 旧形式: { cpu: [...], gpu: [...] }
+  return Object.entries(groups).flatMap(([category, items]) => {
+    const list = Array.isArray(items) ? items : []
+    return list.map((item) => ({
+      ...item,
+      category: item.category || category,
+    }))
+  })
 }
 
 export function PricesPage({ showToast }: Props) {
@@ -13,15 +37,18 @@ export function PricesPage({ showToast }: Props) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const load = async () => {
     setLoading(true)
+    setError(null)
     try {
       const payload = await getPrices()
       setData(payload)
       setTracked(new Set(payload.tracked_ids || []))
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      setError(message)
       showToast(`価格情報の取得に失敗: ${message}`)
     } finally {
       setLoading(false)
@@ -32,12 +59,7 @@ export function PricesPage({ showToast }: Props) {
     void load()
   }, [])
 
-  const catalogItems = useMemo(() => {
-    const groups = data?.groups || {}
-    return Object.entries(groups).flatMap(([category, items]) =>
-      (items || []).map((item) => ({ ...item, category: item.category || category })),
-    )
-  }, [data])
+  const catalogItems = useMemo(() => flattenCatalog(data?.groups), [data])
 
   const toggle = (id: string) => {
     setTracked((prev) => {
@@ -94,6 +116,23 @@ export function PricesPage({ showToast }: Props) {
     return (
       <div className="page">
         <div className="panel muted">読み込み中…</div>
+      </div>
+    )
+  }
+
+  if (error && !data) {
+    return (
+      <div className="page">
+        <div className="page-head">
+          <h2>価格</h2>
+          <p>パーツの相場を追跡します。</p>
+        </div>
+        <section className="panel">
+          <p className="muted">価格情報を読み込めませんでした: {error}</p>
+          <button type="button" className="btn primary" onClick={() => void load()}>
+            再読み込み
+          </button>
+        </section>
       </div>
     )
   }

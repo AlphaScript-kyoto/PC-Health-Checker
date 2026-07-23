@@ -170,9 +170,21 @@ export interface PricePart {
   [key: string]: unknown
 }
 
+export interface PriceCatalogGroup {
+  category: string
+  label?: string
+  brands?: Array<{
+    brand: string
+    label?: string
+    items: PricePart[]
+  }>
+  items?: PricePart[]
+}
+
 export interface PricesPayload {
   catalog_version?: string
-  groups?: Record<string, PricePart[]>
+  /** 新形式は配列。旧形式の Record も許容する */
+  groups?: PriceCatalogGroup[] | Record<string, PricePart[]>
   tracked_ids?: string[]
   overview?: PricePart[]
   legacy_items?: PricePart[]
