@@ -1,26 +1,65 @@
 {
   "name": "pc-health-checker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "パソコンちぇっ君 — ディスク健全性・容量マップ・買い替え提案",
   "main": "dist-electron/main.js",
   "private": true,
+  "author": {
+    "name": "Alpha Script",
+    "url": "https://alphascript-kyoto.github.io/as-homepage/"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "start": "electron .",
     "preview": "vite preview",
-    "icon": "backend\\.venv\\Scripts\\python.exe scripts\\make_app_icon.py"
+    "icon": "backend\\.venv\\Scripts\\python.exe scripts\\make_app_icon.py",
+    "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_backend.ps1",
+    "dist": "electron-builder --win portable",
+    "release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_release.ps1"
   },
   "build": {
-    "appId": "jp.alphascript.pc-health-checker",
+    "appId": "jp.alphascript.pc-chekkun",
     "productName": "パソコンちぇっ君",
+    "copyright": "Copyright © Alpha Script",
     "directories": {
       "output": "release",
       "buildResources": "build"
     },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-backend/pc-health-backend/",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      }
+    ],
     "win": {
-      "icon": "build/icon.ico"
-    }
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "PC-Chekkun-${version}-portable.exe"
+    },
+    "portable": {
+      "artifactName": "PC-Chekkun-${version}-portable.exe"
+    },
+    "asar": true
   },
   "dependencies": {
     "d3-hierarchy": "^3.1.2",
@@ -34,6 +73,7 @@
     "@types/react-dom": "^19.1.5",
     "@vitejs/plugin-react": "^4.4.1",
     "electron": "^36.2.1",
+    "electron-builder": "^26.15.3",
     "typescript": "^5.8.3",
     "vite": "^6.3.5",
     "vite-plugin-electron": "^0.29.0",

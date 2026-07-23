@@ -57,11 +57,12 @@ def main() -> None:
     ico_sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     ico_images = [square.resize(size, Image.Resampling.LANCZOS) for size in ico_sizes]
     ico_path = BUILD / "icon.ico"
-    ico_images[0].save(
+    # 最大サイズを主画像にし、他サイズを append（16x16 のみにならないように）
+    ico_images[-1].save(
         ico_path,
         format="ICO",
         sizes=ico_sizes,
-        append_images=ico_images[1:],
+        append_images=ico_images[:-1],
     )
     shutil.copy2(ico_path, ASSETS / "icon.ico")
     print(f"OK: {ASSETS / 'icon.png'}")

@@ -51,8 +51,8 @@ function viteDevUrlPath(): string {
   return path.join(elevateStateDir(), 'vite-dev-url.txt')
 }
 
-/** dist-electron の親 = プロジェクトルート */
-const ROOT = path.join(__dirname, '..')
+/** dist-electron の親 = プロジェクトルート（パッケージ時は app.asar） */
+const ROOT = app.isPackaged ? app.getAppPath() : path.join(__dirname, '..')
 
 // 通常起動と管理者起動で userData / シングルインスタンスロックがズレないように固定
 {

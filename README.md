@@ -48,7 +48,31 @@ npm run build
 npm start
 ```
 
-ポータブル exe の再パッケージは、従来の PC Health と同様に PyInstaller + electron-builder で行います（`scripts/` 参照）。
+### リリース版（ポータブル exe）
+
+```powershell
+npm run release
+```
+
+完了すると `release` フォルダに次が並びます。
+
+- `PC-Chekkun-*-portable.exe` … 本体
+- `run_as_admin.bat` … 管理者起動用
+- `readme.txt` … 使い方
+
+**ZIP にするのは `release` フォルダです。**  
+（フォルダごと zip しても、中の3ファイルだけ zip してもどちらでもOK）
+
+中身の例:
+
+```
+release/
+  PC-Chekkun-0.2.0-portable.exe
+  run_as_admin.bat
+  readme.txt
+```
+
+※ 初回は PyInstaller の導入とバックエンド固めで数分〜十数分かかります。
 
 ## 画面
 
@@ -85,7 +109,10 @@ npm start
 | `src/pages/PricesPage.tsx` | 価格追跡・カタログ UI |
 | `src/components/PriceCharts.tsx` | 価格推移グラフ / Keepa 埋め込み |
 | `assets/icon.png` / `build/icon.ico` | アプリアイコン（ウィンドウ・トレイ・配布用） |
-| `scripts/make_app_icon.py` | アイコン画像から PNG / ICO を再生成 |
+| `scripts/build_backend.ps1` | Python バックエンドを PyInstaller で固める |
+| `scripts/build_release.ps1` | UI + バックエンド + portable exe を一括作成 |
+| `packaging/` | 配布同梱の readme / 管理者起動 bat |
+| `release/` | **配布用の完成物（ここを ZIP する）** |
 | `backend/app/` | FastAPI・スキャン・DB・価格・ニュース |
 | `backend/app/scanner.py` | 健康診断と容量マップの並行スキャン・二重進捗 |
 | `backend/app/collectors/disks.py` | SMART / 識別情報の収集 |
