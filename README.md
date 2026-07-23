@@ -63,6 +63,8 @@ npm start
 | `electron/main.ts` | ウィンドウ・トレイ・管理者昇格・Python 起動 |
 | `electron/preload.ts` | 画面向け安全 API |
 | `src/` | React UI（全タブ） |
+| `assets/icon.png` / `build/icon.ico` | アプリアイコン（ウィンドウ・トレイ・配布用） |
+| `scripts/make_app_icon.py` | アイコン画像から PNG / ICO を再生成 |
 | `backend/app/` | FastAPI・スキャン・DB・価格・ニュース |
 | `backend/app/space_scan.py` | 容量マップ用フォルダ走査 |
 | `requirements.txt` | Python 依存関係 |

@@ -8,7 +8,19 @@
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "start": "electron .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "icon": "backend\\.venv\\Scripts\\python.exe scripts\\make_app_icon.py"
+  },
+  "build": {
+    "appId": "jp.alphascript.pc-health-checker",
+    "productName": "PCの健康チェッカー",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "win": {
+      "icon": "build/icon.ico"
+    }
   },
   "dependencies": {
     "d3-hierarchy": "^3.1.2",

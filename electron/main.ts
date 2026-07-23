@@ -204,7 +204,37 @@ function waitForServer(timeoutMs = 45000): Promise<void> {
   })
 }
 
-function trayIcon(): Electron.NativeImage {
+function resolveAppIconPath(): string | null {
+  const candidates = [
+    path.join(ROOT, 'build', 'icon.ico'),
+    path.join(ROOT, 'assets', 'icon.ico'),
+    path.join(ROOT, 'build', 'icon.png'),
+    path.join(ROOT, 'assets', 'icon.png'),
+  ]
+  if (app.isPackaged) {
+    candidates.unshift(
+      path.join(process.resourcesPath, 'build', 'icon.ico'),
+      path.join(process.resourcesPath, 'icon.ico'),
+      path.join(process.resourcesPath, 'icon.png'),
+    )
+  }
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate
+  }
+  return null
+}
+
+function loadAppIcon(): Electron.NativeImage {
+  const iconPath = resolveAppIconPath()
+  if (iconPath) {
+    try {
+      const image = nativeImage.createFromPath(iconPath)
+      if (!image.isEmpty()) return image
+    } catch {
+      // fall through
+    }
+  }
+  // 最終手段の小さなプレースホルダ
   const png = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAvklEQVQ4T2NkYGD4z0ABYBzVMKoBBgxgYGBg+M+AARAHGBgYGBgYGBgY/jMwMDAwMDAw/GdgYGBgYGBg+M/AwMDAwMDAwPCfgYGBgYGBgYH/PwMDAwMDAwPDfwYGBgYGBgaG/wwMDAwMDAwM/xkYGBgYGBgY/jMwMDAwMDAw/GdgYGBgYGBg+M/AwMDAwMDAwPCfgYGBgYGBgYH/PwMDAwMDAwPDfwYGBgYGBgaG/wwMDAwMDAwM/xkYGBgYGBgY/jMwMDAwMDAw/GdgYGBgYGBg+M8AAK0aAxX1m7uVAAAAAElFTkSuQmCC',
     'base64',
@@ -213,6 +243,17 @@ function trayIcon(): Electron.NativeImage {
     return nativeImage.createFromBuffer(png)
   } catch {
     return nativeImage.createEmpty()
+  }
+}
+
+function trayIcon(): Electron.NativeImage {
+  const icon = loadAppIcon()
+  if (icon.isEmpty()) return icon
+  // トレイは小さめの方が見やすい
+  try {
+    return icon.resize({ width: 16, height: 16, quality: 'best' })
+  } catch {
+    return icon
   }
 }
 
@@ -438,6 +479,7 @@ async function elevateAndQuit(): Promise<boolean> {
 }
 
 function createWindow() {
+  const iconPath = resolveAppIconPath()
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -447,6 +489,7 @@ function createWindow() {
     backgroundColor: '#eef3f7',
     autoHideMenuBar: true,
     show: false,
+    ...(iconPath ? { icon: iconPath } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
