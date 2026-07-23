@@ -7,28 +7,28 @@ interface Props {
   showToast: (message: string) => void
 }
 
-function flattenCatalog(groups: PricesPayload['groups']): PricePart[] {
+function asCatalogGroups(groups: PricesPayload['groups']): PriceCatalogGroup[] {
   if (!groups) return []
+  if (Array.isArray(groups)) return groups
+  return Object.entries(groups).map(([category, items]) => ({
+    category,
+    label: category,
+    items: Array.isArray(items) ? items : [],
+    brands: [
+      {
+        brand: 'すべて',
+        label: 'すべて',
+        items: Array.isArray(items) ? items : [],
+      },
+    ],
+  }))
+}
 
-  // 新形式: [{ category, items, brands }, ...]
-  if (Array.isArray(groups)) {
-    return groups.flatMap((group: PriceCatalogGroup) => {
-      const items = Array.isArray(group.items) ? group.items : []
-      return items.map((item) => ({
-        ...item,
-        category: item.category || group.category || group.label,
-      }))
-    })
-  }
-
-  // 旧形式: { cpu: [...], gpu: [...] }
-  return Object.entries(groups).flatMap(([category, items]) => {
-    const list = Array.isArray(items) ? items : []
-    return list.map((item) => ({
-      ...item,
-      category: item.category || category,
-    }))
-  })
+function amdPlatform(item: PricePart): string {
+  const generation = String(item.generation || '')
+  if (generation.includes('5000')) return 'AM4'
+  if (generation.includes('7000') || generation.includes('9000')) return 'AM5'
+  return 'その他'
 }
 
 export function PricesPage({ showToast }: Props) {
@@ -38,6 +38,10 @@ export function PricesPage({ showToast }: Props) {
   const [saving, setSaving] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [openCategories, setOpenCategories] = useState<Record<string, boolean>>({})
+  const [openBrands, setOpenBrands] = useState<Record<string, boolean>>({})
+  const [intelGenFilter, setIntelGenFilter] = useState<string>('all')
+  const [amdPlatformFilter, setAmdPlatformFilter] = useState<string>('all')
 
   const load = async () => {
     setLoading(true)
@@ -46,6 +50,12 @@ export function PricesPage({ showToast }: Props) {
       const payload = await getPrices()
       setData(payload)
       setTracked(new Set(payload.tracked_ids || []))
+      const groups = asCatalogGroups(payload.groups)
+      const nextOpen: Record<string, boolean> = {}
+      groups.forEach((g, index) => {
+        nextOpen[g.category] = index === 0
+      })
+      setOpenCategories(nextOpen)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       setError(message)
@@ -59,7 +69,31 @@ export function PricesPage({ showToast }: Props) {
     void load()
   }, [])
 
-  const catalogItems = useMemo(() => flattenCatalog(data?.groups), [data])
+  const catalogGroups = useMemo(() => asCatalogGroups(data?.groups), [data])
+
+  const intelGenerations = useMemo(() => {
+    const set = new Set<string>()
+    catalogGroups
+      .filter((g) => g.category === 'cpu')
+      .forEach((g) => {
+        ;(g.items || []).forEach((item) => {
+          if (item.brand === 'Intel' && item.generation) set.add(String(item.generation))
+        })
+      })
+    return [...set]
+  }, [catalogGroups])
+
+  const amdPlatforms = useMemo(() => {
+    const set = new Set<string>()
+    catalogGroups
+      .filter((g) => g.category === 'cpu')
+      .forEach((g) => {
+        ;(g.items || []).forEach((item) => {
+          if (item.brand === 'AMD') set.add(amdPlatform(item))
+        })
+      })
+    return [...set]
+  }, [catalogGroups])
 
   const toggle = (id: string) => {
     setTracked((prev) => {
@@ -110,6 +144,16 @@ export function PricesPage({ showToast }: Props) {
       const message = err instanceof Error ? err.message : String(err)
       showToast(`処理に失敗: ${message}`)
     }
+  }
+
+  const filterCpuItem = (item: PricePart) => {
+    if (item.brand === 'Intel' && intelGenFilter !== 'all') {
+      return String(item.generation || '') === intelGenFilter
+    }
+    if (item.brand === 'AMD' && amdPlatformFilter !== 'all') {
+      return amdPlatform(item) === amdPlatformFilter
+    }
+    return true
   }
 
   if (loading) {
@@ -244,22 +288,126 @@ export function PricesPage({ showToast }: Props) {
 
       <section className="panel">
         <h3>カタログから追跡</h3>
-        <div className="stack" style={{ marginTop: 8, maxHeight: 420, overflow: 'auto' }}>
-          {catalogItems.map((item) => (
-            <label className="list-row" key={item.id} style={{ cursor: 'pointer' }}>
-              <div>
-                <strong>{item.name}</strong>
-                <p className="muted" style={{ margin: '4px 0 0' }}>
-                  {item.category} · {item.generation}
-                </p>
-              </div>
-              <input
-                type="checkbox"
-                checked={tracked.has(item.id)}
-                onChange={() => toggle(item.id)}
-              />
+        <p className="muted" style={{ marginTop: 4 }}>
+          カテゴリ → メーカーの順に折りたためます。CPU は世代 / ソケットで絞り込みできます。
+        </p>
+
+        {catalogGroups.some((g) => g.category === 'cpu') && (
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
+            <label className="muted" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              Intel 世代
+              <select value={intelGenFilter} onChange={(e) => setIntelGenFilter(e.target.value)}>
+                <option value="all">すべて</option>
+                {intelGenerations.map((gen) => (
+                  <option key={gen} value={gen}>
+                    {gen}
+                  </option>
+                ))}
+              </select>
             </label>
-          ))}
+            <label className="muted" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              AMD ソケット
+              <select
+                value={amdPlatformFilter}
+                onChange={(e) => setAmdPlatformFilter(e.target.value)}
+              >
+                <option value="all">すべて</option>
+                {amdPlatforms.map((sock) => (
+                  <option key={sock} value={sock}>
+                    {sock}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+
+        <div className="stack" style={{ marginTop: 12, maxHeight: 520, overflow: 'auto' }}>
+          {catalogGroups.map((group) => {
+            const categoryOpen = Boolean(openCategories[group.category])
+            const brands =
+              group.brands && group.brands.length > 0
+                ? group.brands
+                : [
+                    {
+                      brand: 'すべて',
+                      label: 'すべて',
+                      items: group.items || [],
+                    },
+                  ]
+            return (
+              <div key={group.category} className="catalog-fold">
+                <button
+                  type="button"
+                  className="catalog-fold-head"
+                  onClick={() =>
+                    setOpenCategories((prev) => ({
+                      ...prev,
+                      [group.category]: !prev[group.category],
+                    }))
+                  }
+                >
+                  <strong>{group.label || group.category}</strong>
+                  <span>{categoryOpen ? '閉じる' : '開く'}</span>
+                </button>
+                {categoryOpen && (
+                  <div className="catalog-fold-body">
+                    {brands.map((brandBlock) => {
+                      const brandKey = `${group.category}::${brandBlock.brand}`
+                      const brandOpen = openBrands[brandKey] ?? true
+                      const items = (brandBlock.items || []).filter((item) =>
+                        group.category === 'cpu' ? filterCpuItem(item) : true,
+                      )
+                      if (items.length === 0) return null
+                      return (
+                        <div key={brandKey} className="catalog-brand">
+                          <button
+                            type="button"
+                            className="catalog-brand-head"
+                            onClick={() =>
+                              setOpenBrands((prev) => ({
+                                ...prev,
+                                [brandKey]: !brandOpen,
+                              }))
+                            }
+                          >
+                            <strong>{brandBlock.label || brandBlock.brand}</strong>
+                            <span>
+                              {items.length}件 · {brandOpen ? '閉じる' : '開く'}
+                            </span>
+                          </button>
+                          {brandOpen && (
+                            <div className="stack" style={{ marginTop: 6 }}>
+                              {items.map((item) => (
+                                <label
+                                  className="list-row"
+                                  key={item.id}
+                                  style={{ cursor: 'pointer' }}
+                                >
+                                  <div>
+                                    <strong>{item.name}</strong>
+                                    <p className="muted" style={{ margin: '4px 0 0' }}>
+                                      {item.generation}
+                                      {item.brand === 'AMD' ? ` · ${amdPlatform(item)}` : ''}
+                                    </p>
+                                  </div>
+                                  <input
+                                    type="checkbox"
+                                    checked={tracked.has(item.id)}
+                                    onChange={() => toggle(item.id)}
+                                  />
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       </section>
     </div>

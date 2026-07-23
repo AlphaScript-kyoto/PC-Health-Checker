@@ -105,6 +105,11 @@ class SpaceScanState:
 
 
 _state = SpaceScanState()
+_results_by_root: dict[str, dict[str, Any]] = {}
+
+
+def _normalize_root(root_path: str) -> str:
+    return str(root_path or "").rstrip("\\/").upper() + "\\"
 
 
 def get_progress() -> dict[str, Any] | None:
@@ -112,8 +117,10 @@ def get_progress() -> dict[str, Any] | None:
         return dict(_state.progress) if _state.progress else None
 
 
-def get_result() -> dict[str, Any] | None:
+def get_result(root_path: str | None = None) -> dict[str, Any] | None:
     with _state.lock:
+        if root_path:
+            return _results_by_root.get(_normalize_root(root_path))
         return _state.result
 
 
@@ -328,6 +335,7 @@ def _run_scan(root_path: str) -> None:
         }
         with _state.lock:
             _state.result = result
+            _results_by_root[_normalize_root(root_path)] = result
             _state.progress = None
             _state.running = False
             _state.error = None
@@ -355,6 +363,27 @@ def start_scan(root_path: str) -> dict[str, Any]:
     thread = threading.Thread(target=_run_scan, args=(root_path,), daemon=True)
     thread.start()
     return {"ok": True}
+
+
+def run_scan_blocking(root_path: str) -> dict[str, Any]:
+    """健康診断スキャンから同期的に1ドライブ分のマップを作る。"""
+    with _state.lock:
+        if _state.running:
+            return {"ok": False, "message": "すでにスキャン中です"}
+        _state.running = True
+        _state.cancelled = False
+        _state.error = None
+        _state.progress = {
+            "scannedFiles": 0,
+            "scannedDirs": 0,
+            "currentPath": root_path,
+            "bytesSeen": 0,
+        }
+    _run_scan(root_path)
+    with _state.lock:
+        if _state.error:
+            return {"ok": False, "message": _state.error}
+        return {"ok": True, "rootPath": root_path}
 
 
 def get_error() -> str | None:

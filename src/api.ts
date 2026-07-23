@@ -126,6 +126,7 @@ export async function getSpaceProgress() {
   return api.get<import('./types').ScanProgress | null>('/api/space/progress')
 }
 
-export async function getSpaceResult() {
-  return api.get<import('./types').SpaceScanResult | null>('/api/space/result')
+export async function getSpaceResult(rootPath?: string) {
+  const q = rootPath ? `?rootPath=${encodeURIComponent(rootPath)}` : ''
+  return api.get<import('./types').SpaceScanResult | null>(`/api/space/result${q}`)
 }

@@ -6,13 +6,19 @@ from typing import Any
 
 
 def _run_ps(script: str) -> Any:
+    # 日本語ラベルの文字化け防止: PowerShell 出力を UTF-8 に固定
+    wrapped = (
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$OutputEncoding = [Console]::OutputEncoding; "
+        + script
+    )
     result = subprocess.run(
         [
             "powershell",
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            script,
+            wrapped,
         ],
         capture_output=True,
         text=True,

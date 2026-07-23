@@ -79,14 +79,24 @@ def build_query(target: dict[str, Any], settings: dict[str, Any]) -> dict[str, A
     }
 
 
+def _quote_utf8(text: str) -> str:
+    return urllib.parse.quote(text, safe="")
+
+
+def _quote_kakaku(text: str) -> str:
+    """価格.com のパス検索は Shift_JIS（CP932）のパーセントエンコードが必要。"""
+    return urllib.parse.quote(text.encode("cp932", errors="replace"))
+
+
 def _search_urls(query: str) -> list[dict[str, str]]:
-    q = urllib.parse.quote(query)
+    q_utf8 = _quote_utf8(query)
+    q_kakaku = _quote_kakaku(query)
     return [
         {
             "source": "価格.com",
             "kind": "price_research",
             "title": f"価格.comで「{query}」を検索",
-            "url": f"https://kakaku.com/search_results/{q}/",
+            "url": f"https://kakaku.com/search_results/{q_kakaku}/",
             "condition": "新品相場",
             "price_hint": "相場確認用（ページ内の最安〜平均を参照）",
         },
@@ -94,7 +104,7 @@ def _search_urls(query: str) -> list[dict[str, str]]:
             "source": "Amazon",
             "kind": "new",
             "title": f"Amazonで「{query}」を検索",
-            "url": f"https://www.amazon.co.jp/s?k={q}",
+            "url": f"https://www.amazon.co.jp/s?k={q_utf8}",
             "condition": "新品中心",
             "price_hint": "新品価格帯を比較",
         },
@@ -102,7 +112,7 @@ def _search_urls(query: str) -> list[dict[str, str]]:
             "source": "楽天市場",
             "kind": "new",
             "title": f"楽天で「{query}」を検索",
-            "url": f"https://search.rakuten.co.jp/search/mall/{q}/",
+            "url": f"https://search.rakuten.co.jp/search/mall/{q_utf8}/",
             "condition": "新品中心",
             "price_hint": "ポイント込みで比較しやすい",
         },
@@ -110,7 +120,7 @@ def _search_urls(query: str) -> list[dict[str, str]]:
             "source": "メルカリ",
             "kind": "used",
             "title": f"メルカリで「{query}」を検索",
-            "url": f"https://jp.mercari.com/search?keyword={q}&status=on_sale",
+            "url": f"https://jp.mercari.com/search?keyword={q_utf8}&status=on_sale",
             "condition": "中古・個人出品",
             "price_hint": "中古相場の目安（状態・保証に注意）",
         },
@@ -118,7 +128,7 @@ def _search_urls(query: str) -> list[dict[str, str]]:
             "source": "Yahoo!フリマ",
             "kind": "used",
             "title": f"Yahoo!フリマで「{query}」を検索",
-            "url": f"https://paypayfleamarket.yahoo.co.jp/search?keyword={q}",
+            "url": f"https://paypayfleamarket.yahoo.co.jp/search?keyword={q_utf8}",
             "condition": "中古・個人出品",
             "price_hint": "中古候補の比較用",
         },

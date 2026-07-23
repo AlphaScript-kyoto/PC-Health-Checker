@@ -84,6 +84,26 @@ export function SpacePage({ initialDrive, showToast }: Props) {
     if (found) setSelectedDrive(found)
   }, [drives, initialDrive])
 
+  // 今すぐスキャン等で作済みのマップがあれば表示
+  useEffect(() => {
+    if (!selectedDrive || apiMissing) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const cached = await getSpaceResult(selectedDrive.rootPath)
+        if (cancelled || !cached?.root) return
+        setResult(cached)
+        setSelected(cached.root)
+        setPhase((current) => (current === 'scanning' ? current : 'done'))
+      } catch {
+        // no cached result
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedDrive, apiMissing])
+
   const startScan = async () => {
     if (!selectedDrive || phase === 'scanning' || apiMissing) return
     setError(null)
@@ -97,7 +117,7 @@ export function SpacePage({ initialDrive, showToast }: Props) {
       bytesSeen: 0,
       percent: 0,
     })
-    showToast(`${selectedDrive.letter}: のスキャンを開始しました`)
+    showToast(`${selectedDrive.letter}:のマッピングを開始しました`)
 
     try {
       await postSpaceScan(selectedDrive.rootPath)
@@ -117,6 +137,7 @@ export function SpacePage({ initialDrive, showToast }: Props) {
       return
     }
 
+    const targetRoot = selectedDrive.rootPath
     stopPolling()
     pollRef.current = window.setInterval(() => {
       void (async () => {
@@ -124,14 +145,14 @@ export function SpacePage({ initialDrive, showToast }: Props) {
           const prog = await getSpaceProgress()
           if (prog) setProgress(prog)
 
-          const done = await getSpaceResult()
+          const done = await getSpaceResult(targetRoot)
           if (done && done.root) {
             stopPolling()
             setResult(done)
             setSelected(done.root)
             setPhase('done')
             setProgress(null)
-            showToast('容量スキャンが完了しました')
+            showToast('マッピングが完了しました')
           }
         } catch (err) {
           if (err instanceof ApiError && err.status === 404) {
@@ -227,7 +248,7 @@ export function SpacePage({ initialDrive, showToast }: Props) {
                 onClick={() => void startScan()}
               >
                 {phase === 'scanning' && <span className="btn-spinner" aria-hidden />}
-                {selectedDrive ? `${selectedDrive.letter}: をスキャン` : 'スキャン'}
+                {selectedDrive ? `${selectedDrive.letter}:のマッピングを作成` : 'マッピングを作成'}
               </button>
             </div>
 

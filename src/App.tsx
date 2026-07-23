@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { getAbout, getScanProgress, postScan } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { getAbout, getScanProgress, getStatus, postScan } from './api'
 import { PageErrorBoundary } from './components/PageErrorBoundary'
 import { Toast } from './components/Toast'
 import { DisksPage } from './pages/DisksPage'
@@ -31,12 +31,23 @@ export default function App() {
   const [elevating, setElevating] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [lastScannedAt, setLastScannedAt] = useState<string | null>(null)
+  const autoScanStarted = useRef(false)
 
   const showToast = useCallback((message: string) => {
     setToast(message)
     window.setTimeout(() => {
       setToast((current) => (current === message ? null : current))
     }, 2200)
+  }, [])
+
+  const refreshLastScan = useCallback(async () => {
+    try {
+      const status = await getStatus()
+      setLastScannedAt(status.scanned_at || null)
+    } catch {
+      // ignore
+    }
   }, [])
 
   const goSpace = useCallback((letter?: string | null) => {
@@ -56,18 +67,18 @@ export default function App() {
       void window.desktopApi?.isAdmin()
         .then((admin) => setElevated(Boolean(admin)))
         .catch(() => {
-          // Electron 外では about API にフォールバック
           void getAbout()
             .then((about) => setElevated(Boolean(about.elevated)))
             .catch(() => setElevated(true))
         })
     }
     refreshAdmin()
+    void refreshLastScan()
     window.addEventListener('focus', refreshAdmin)
     return () => window.removeEventListener('focus', refreshAdmin)
-  }, [refreshKey])
+  }, [refreshKey, refreshLastScan])
 
-  const runScan = async () => {
+  const runScan = useCallback(async () => {
     if (scanning) return
     setScanning(true)
     setScanProgress({
@@ -79,7 +90,6 @@ export default function App() {
     showToast('スキャンを開始しました…')
     try {
       await postScan()
-      // 進捗をポーリング（SMART 取得などで数十秒かかることがある）
       for (;;) {
         await new Promise((r) => window.setTimeout(r, 400))
         const progress = await getScanProgress()
@@ -89,6 +99,7 @@ export default function App() {
             showToast(`スキャンに失敗しました: ${progress.error}`)
           } else {
             setRefreshKey((k) => k + 1)
+            await refreshLastScan()
             showToast('スキャンが完了しました')
           }
           break
@@ -110,7 +121,17 @@ export default function App() {
         setScanProgress((current) => (current?.running ? current : null))
       }, 1800)
     }
-  }
+  }, [scanning, showToast, refreshLastScan])
+
+  // 起動時は必ず健康診断スキャンを実行
+  useEffect(() => {
+    if (autoScanStarted.current) return
+    autoScanStarted.current = true
+    const timer = window.setTimeout(() => {
+      void runScan()
+    }, 1200)
+    return () => window.clearTimeout(timer)
+  }, [runScan])
 
   const elevate = async () => {
     if (elevating) return
@@ -178,17 +199,24 @@ export default function App() {
                 {elevating ? '準備中…' : '管理者として再起動'}
               </button>
             )}
-            <button
-              type="button"
-              className={`btn primary ${scanning ? 'is-busy' : ''}`}
-              onClick={() => void runScan()}
-              disabled={scanning}
-            >
-              {scanning && <span className="btn-spinner" aria-hidden />}
-              {scanning
-                ? `スキャン中 ${Math.round(scanProgress?.percent ?? 0)}%`
-                : '今すぐスキャン'}
-            </button>
+            <div className="scan-action">
+              <button
+                type="button"
+                className={`btn primary ${scanning ? 'is-busy' : ''}`}
+                onClick={() => void runScan()}
+                disabled={scanning}
+              >
+                {scanning && <span className="btn-spinner" aria-hidden />}
+                {scanning
+                  ? `スキャン中 ${Math.round(scanProgress?.percent ?? 0)}%`
+                  : '今すぐスキャン'}
+              </button>
+              <p className="scan-last">
+                {lastScannedAt
+                  ? `最終スキャン: ${new Date(lastScannedAt).toLocaleString('ja-JP')}`
+                  : '最終スキャン: まだありません'}
+              </p>
+            </div>
           </div>
         </header>
 

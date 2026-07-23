@@ -253,7 +253,7 @@ def api_space_progress() -> dict[str, Any] | None:
 
 
 @app.get("/api/space/result")
-def api_space_result() -> dict[str, Any] | None:
+def api_space_result(rootPath: str | None = None) -> dict[str, Any] | None:
     from app.space_scan import get_error, get_result
 
     err = get_error()
@@ -261,7 +261,7 @@ def api_space_result() -> dict[str, Any] | None:
         raise HTTPException(409, "スキャンをキャンセルしました。")
     if err:
         raise HTTPException(500, err)
-    return get_result()
+    return get_result(rootPath)
 
 
 @app.post("/api/space/cancel")

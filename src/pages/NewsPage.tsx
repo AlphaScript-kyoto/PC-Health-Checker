@@ -27,7 +27,7 @@ export function NewsPage({ showToast }: Props) {
   }
 
   useEffect(() => {
-    void load(false)
+    void load(true)
   }, [])
 
   const items: NewsItem[] = data?.items || []

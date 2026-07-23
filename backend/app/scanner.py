@@ -203,10 +203,16 @@ def run_scan(notify_alerts: bool = True) -> dict[str, Any]:
                 except Exception:
                     pass
 
+            # 容量マップもまとめて作成（固定・リムーバブルの各ドライブ）
+            try:
+                _run_space_maps_after_health()
+            except Exception as map_exc:
+                print("space map after health failed", map_exc)
+
             _set_progress(
                 phase="done",
                 percent=100,
-                message="スキャンが完了しました",
+                message="健康診断と容量マップの作成が完了しました",
                 finished=True,
             )
             return payload
@@ -218,6 +224,27 @@ def run_scan(notify_alerts: bool = True) -> dict[str, Any]:
                 finished=True,
             )
             raise
+
+
+def _run_space_maps_after_health() -> None:
+    from app.space_scan import list_drives, run_scan_blocking
+
+    drives = list_drives()
+    if not drives:
+        return
+    total = len(drives)
+    for index, drive in enumerate(drives):
+        letter = drive.get("letter") or "?"
+        root = drive.get("rootPath") or f"{letter}:\\"
+        base = 78
+        span = 20
+        percent = base + int((index / max(total, 1)) * span)
+        _set_progress(
+            phase="space_map",
+            percent=percent,
+            message=f"{letter}: のマッピングを作成中…（{index + 1}/{total}）",
+        )
+        run_scan_blocking(root)
 
 
 def start_scan(notify_alerts: bool = True) -> dict[str, Any]:

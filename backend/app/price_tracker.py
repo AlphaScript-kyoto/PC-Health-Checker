@@ -327,7 +327,9 @@ def _fetch_amazon_price(query: str) -> dict[str, Any] | None:
 
 
 def _kakaku_url(query: str) -> str:
-    return f"https://kakaku.com/search_results/{urllib.parse.quote(query)}/"
+    # 価格.com の検索パスは CP932（Shift_JIS）エンコードが必要
+    encoded = urllib.parse.quote(query.encode("cp932", errors="replace"))
+    return f"https://kakaku.com/search_results/{encoded}/"
 
 
 def _fetch_kakaku_price(query: str) -> dict[str, Any] | None:
