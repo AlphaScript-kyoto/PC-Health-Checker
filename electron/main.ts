@@ -20,6 +20,9 @@ const PORT = 8787
 const BASE = `http://${HOST}:${PORT}`
 const APP_TITLE = 'PCの健康チェッカー'
 const VITE_ARG_PREFIX = '--pchc-vite='
+/** 昇格引き継ぎ用（旧PIDの強制終了・成功通知） */
+const ELEVATE_MARKER = path.join(os.tmpdir(), 'pchc-elevate-marker.json')
+const ELEVATE_READY = path.join(os.tmpdir(), 'pchc-elevate-ready.txt')
 
 /** dist-electron の親 = プロジェクトルート */
 const ROOT = path.join(__dirname, '..')
@@ -189,18 +192,119 @@ function isAdmin(): boolean {
   }
 }
 
+type ElevateMarker = { oldPid: number; at: number }
+
+function writeElevateMarker(oldPid: number) {
+  const data: ElevateMarker = { oldPid, at: Date.now() }
+  fs.writeFileSync(ELEVATE_MARKER, JSON.stringify(data), 'utf8')
+  try {
+    fs.unlinkSync(ELEVATE_READY)
+  } catch {
+    // ignore
+  }
+}
+
+function readElevateMarker(): ElevateMarker | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(ELEVATE_MARKER, 'utf8')) as ElevateMarker
+    if (!raw?.oldPid || !raw?.at) return null
+    // 2分以上前のマーカーは無視
+    if (Date.now() - raw.at > 120000) return null
+    return raw
+  } catch {
+    return null
+  }
+}
+
+function clearElevateMarker() {
+  for (const p of [ELEVATE_MARKER, ELEVATE_READY]) {
+    try {
+      fs.unlinkSync(p)
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function markElevateReady() {
+  fs.writeFileSync(ELEVATE_READY, String(Date.now()), 'utf8')
+}
+
+function isElevateReady(): boolean {
+  try {
+    const t = Number(fs.readFileSync(ELEVATE_READY, 'utf8'))
+    return Number.isFinite(t) && Date.now() - t < 120000
+  } catch {
+    return false
+  }
+}
+
+function killProcessTree(pid: number) {
+  if (!pid || pid === process.pid) return
+  try {
+    if (process.platform === 'win32') {
+      execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' })
+    } else {
+      process.kill(pid, 'SIGTERM')
+    }
+  } catch {
+    // 既に終了済みなど
+  }
+}
+
 /**
- * UAC で管理者として同じアプリを起動する。
- * Start-Process -Verb RunAs だと環境変数が消えるため、
- * 昇格した PowerShell 内で VITE URL をセットしてから Electron を起動する。
- *
- * 重要: Electron は Process.Start(UseShellExecute) で完全に切り離す。
- * PowerShell の Start-Process -Wait が子の Electron まで待ち続け、
- * 旧ウィンドウが「確認画面を待機中」のまま残るのを防ぐ。
+ * 管理者で起動した瞬間に、昇格前プロセスを強制終了する。
+ * （旧側の PowerShell -Wait が宙吊りになりウィンドウが残る問題の対策）
  */
-async function relaunchElevated(): Promise<boolean> {
+function takeoverFromNonElevatedPredecessor() {
+  if (!isAdmin()) return
+  const marker = readElevateMarker()
+  if (!marker) return
+
+  // 先に ready を書き、殺し損ねても旧側が自分で終了できるようにする
+  markElevateReady()
+  killProcessTree(marker.oldPid)
+  killOtherAppElectronProcesses()
+
+  try {
+    fs.unlinkSync(ELEVATE_MARKER)
+  } catch {
+    // ignore
+  }
+}
+
+/** 同じアプリの他 Electron を落とす（二重起動の掃除） */
+function killOtherAppElectronProcesses() {
+  if (process.platform !== 'win32') return
+  const self = process.pid
+  const ps = `
+$ErrorActionPreference = 'SilentlyContinue'
+Get-CimInstance Win32_Process | Where-Object {
+  $_.ProcessId -ne ${self} -and
+  (
+    ($_.Name -match 'electron|PCHealth|pc-health' -and $_.CommandLine -match 'pc-health-checker') -or
+    ($_.CommandLine -match 'pc-health-checker' -and $_.CommandLine -match 'electron')
+  )
+} | ForEach-Object {
+  Stop-Process -Id $_.ProcessId -Force
+}
+`
+  try {
+    execSync(`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ${JSON.stringify(ps)}`, {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * UAC ダイアログだけ起動する（完了を待たない）。
+ * -Wait すると Electron まで待ち続け、旧ウィンドウが残るため待たない。
+ */
+function spawnElevatedNoWait(): boolean {
   if (process.platform !== 'win32') return false
-  if (isAdmin()) return true
 
   const exe = process.execPath
   const workDir = ROOT
@@ -218,7 +322,6 @@ async function relaunchElevated(): Promise<boolean> {
   const argListPs = electronArgs.map(quoteForPsSingle).join(', ')
   const stamp = `${process.pid}-${Date.now()}`
   const workerPath = path.join(os.tmpdir(), `pchc-elevated-${stamp}.ps1`)
-  const launcherPath = path.join(os.tmpdir(), `pchc-elevate-launch-${stamp}.ps1`)
 
   const elevatedWorker = `
 $ErrorActionPreference = 'Stop'
@@ -237,83 +340,83 @@ if ($argList.Count -gt 0) {
   }) -join ' '
 }
 [void][System.Diagnostics.Process]::Start($psi)
+Remove-Item -LiteralPath ${quoteForPsSingle(workerPath)} -Force -ErrorAction SilentlyContinue
 [Environment]::Exit(0)
-`.trim()
-
-  const launcher = `
-$ErrorActionPreference = 'Stop'
-$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',${quoteForPsSingle(workerPath)})
-if ($null -eq $p) { exit 1 }
-exit $(if ($null -eq $p.ExitCode) { 0 } else { $p.ExitCode })
 `.trim()
 
   try {
     fs.writeFileSync(workerPath, elevatedWorker, 'utf8')
-    fs.writeFileSync(launcherPath, launcher, 'utf8')
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(
-        'powershell.exe',
-        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', launcherPath],
-        { windowsHide: true, stdio: 'ignore' },
-      )
-      const timer = setTimeout(() => {
-        try {
-          child.kill()
-        } catch {
-          // ignore
-        }
-        reject(new Error('elevation timed out'))
-      }, 180000)
-      child.on('error', (err) => {
-        clearTimeout(timer)
-        reject(err)
-      })
-      child.on('exit', (code) => {
-        clearTimeout(timer)
-        if (code === 0) resolve()
-        else reject(new Error(`elevation exited with code ${code}`))
-      })
-    })
+    // UAC だけ出して即座に戻る（-Wait しない）
+    const child = spawn(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        `Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',${quoteForPsSingle(workerPath)})`,
+      ],
+      { windowsHide: true, stdio: 'ignore', detached: true },
+    )
+    child.unref()
     return true
   } catch (error) {
-    console.error('elevation failed', error)
-    return false
-  } finally {
-    for (const p of [workerPath, launcherPath]) {
-      try {
-        fs.unlinkSync(p)
-      } catch {
-        // ignore
-      }
+    console.error('elevation spawn failed', error)
+    try {
+      fs.unlinkSync(workerPath)
+    } catch {
+      // ignore
     }
+    return false
   }
 }
 
-/** 管理者として立ち上げ直す（成功後に旧ウィンドウを必ず閉じる） */
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * 管理者として立ち上げ直す。
+ * 1) 旧PIDをマーカーに書く
+ * 2) UAC を待つ（待たない起動）
+ * 3) 昇格プロセスが旧PIDを taskkill する
+ * 4) ready を確認したら自分も終了（殺し損ね対策）
+ */
 async function elevateAndQuit(): Promise<boolean> {
   if (isAdmin()) return true
 
-  // 先にバックエンドを落とし、昇格側が 8787 を使えるようにする
   stopBackend()
-  // ロックを外さないと、昇格プロセスが「2つ目」扱いですぐ終了する
+  writeElevateMarker(process.pid)
   app.releaseSingleInstanceLock()
 
-  const ok = await relaunchElevated()
-  if (!ok) {
+  const spawned = spawnElevatedNoWait()
+  if (!spawned) {
+    clearElevateMarker()
     app.requestSingleInstanceLock()
-    // 開発中はバックエンドを戻す
     startBackend()
     return false
   }
 
-  // 昇格プロセス起動済み → 旧プロセスは即終了（Vite が再起動しても single-instance で落ちる）
-  try {
-    mainWindow?.hide()
-  } catch {
-    // ignore
+  // 昇格側が ready を書くか、自分が高々殺されるまで待つ
+  const deadline = Date.now() + 120000
+  while (Date.now() < deadline) {
+    if (isElevateReady()) {
+      try {
+        mainWindow?.hide()
+      } catch {
+        // ignore
+      }
+      setTimeout(() => forceQuitApp(), 50)
+      return true
+    }
+    await sleep(200)
   }
-  setTimeout(() => forceQuitApp(), 300)
-  return true
+
+  // UAC キャンセル or 失敗
+  clearElevateMarker()
+  app.requestSingleInstanceLock()
+  startBackend()
+  return false
 }
 
 function createWindow() {
@@ -462,6 +565,9 @@ if (!gotLock) {
   // トレイ常駐の quit() だと残ることがあるため exit
   app.exit(0)
 } else {
+  // 管理者で起動した側が、昇格前の旧プロセスを必ず落とす
+  takeoverFromNonElevatedPredecessor()
+
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
