@@ -44,6 +44,10 @@ function elevateReadyPath(): string {
   return path.join(elevateStateDir(), 'elevate-ready.txt')
 }
 
+function viteDevUrlPath(): string {
+  return path.join(elevateStateDir(), 'vite-dev-url.txt')
+}
+
 /** dist-electron の親 = プロジェクトルート */
 const ROOT = path.join(__dirname, '..')
 
@@ -74,8 +78,28 @@ function getViteDevServerUrl(): string | undefined {
   const fromEnv = process.env.VITE_DEV_SERVER_URL?.trim()
   if (fromEnv) return fromEnv
   const fromArg = process.argv.find((a) => a.startsWith(VITE_ARG_PREFIX))
-  if (fromArg) return fromArg.slice(VITE_ARG_PREFIX.length).trim() || undefined
+  if (fromArg) {
+    const url = fromArg.slice(VITE_ARG_PREFIX.length).trim()
+    if (url) return url
+  }
+  // 管理者再起動で引数/環境変数が落ちても、共有ファイルから復元する
+  try {
+    const fromFile = fs.readFileSync(viteDevUrlPath(), 'utf8').trim()
+    if (fromFile) return fromFile
+  } catch {
+    // ignore
+  }
   return undefined
+}
+
+function persistViteDevServerUrl(url: string | undefined) {
+  if (!url) return
+  try {
+    fs.writeFileSync(viteDevUrlPath(), url, 'utf8')
+    process.env.VITE_DEV_SERVER_URL = url
+  } catch (error) {
+    console.error('failed to persist vite url', error)
+  }
 }
 
 function pythonPath(): string {
@@ -267,16 +291,17 @@ function isAdmin(): boolean {
   }
 }
 
-type ElevateMarker = { oldPid: number; at: number }
+type ElevateMarker = { oldPid: number; at: number; viteUrl?: string }
 
-function writeElevateMarker(oldPid: number) {
-  const data: ElevateMarker = { oldPid, at: Date.now() }
+function writeElevateMarker(oldPid: number, viteUrl?: string) {
+  const data: ElevateMarker = { oldPid, at: Date.now(), viteUrl }
   fs.writeFileSync(elevateMarkerPath(), JSON.stringify(data), 'utf8')
   try {
     fs.unlinkSync(elevateReadyPath())
   } catch {
     // ignore
   }
+  if (viteUrl) persistViteDevServerUrl(viteUrl)
 }
 
 function readElevateMarker(): ElevateMarker | null {
@@ -336,6 +361,11 @@ function takeoverFromNonElevatedPredecessor() {
   const marker = readElevateMarker()
   if (!marker) return
 
+  // UI 用 Vite URL を先に復元（マーカー削除前）
+  if (marker.viteUrl) {
+    persistViteDevServerUrl(marker.viteUrl)
+  }
+
   // ロック取得後にだけ ready を書く（早すぎる ready だと旧が先に落ちて昇格側が起動失敗する）
   markElevateReady()
   killProcessTree(marker.oldPid)
@@ -358,6 +388,7 @@ function spawnElevatedElectron(): {
   const exe = process.execPath
   const workDir = ROOT
   const viteUrl = getViteDevServerUrl() ?? ''
+  persistViteDevServerUrl(viteUrl || undefined)
 
   const baseArgs = process.argv
     .slice(1)
@@ -370,16 +401,23 @@ function spawnElevatedElectron(): {
 
   const stamp = `${process.pid}-${Date.now()}`
   const scriptPath = path.join(elevateStateDir(), `elevate-runas-${stamp}.ps1`)
-  const argListPs = electronArgs.map(quoteForPsSingle).join(', ')
+
+  // Start-Process -ArgumentList 配列は URL を壊しやすいので、1本の文字列にする
+  const argString = electronArgs
+    .map((a) => {
+      if (/[\s"]/.test(a)) return `"${a.replace(/"/g, '\\"')}"`
+      return a
+    })
+    .join(' ')
 
   const script = `
 $ErrorActionPreference = 'Stop'
 try {
   $exe = ${quoteForPsSingle(exe)}
   $workDir = ${quoteForPsSingle(workDir)}
-  $argList = @(${argListPs})
-  if ($argList.Count -gt 0) {
-    Start-Process -FilePath $exe -WorkingDirectory $workDir -Verb RunAs -ArgumentList $argList
+  $argString = ${quoteForPsSingle(argString)}
+  if ($argString.Length -gt 0) {
+    Start-Process -FilePath $exe -WorkingDirectory $workDir -Verb RunAs -ArgumentList $argString
   } else {
     Start-Process -FilePath $exe -WorkingDirectory $workDir -Verb RunAs
   }
@@ -426,7 +464,8 @@ async function elevateAndQuit(): Promise<boolean> {
   if (isAdmin()) return true
 
   stopBackend()
-  writeElevateMarker(process.pid)
+  const viteUrl = getViteDevServerUrl()
+  writeElevateMarker(process.pid, viteUrl)
   // 先にロックを外す（昇格プロセスが 2 つ目扱いで即終了するのを防ぐ）
   app.releaseSingleInstanceLock()
 
@@ -478,6 +517,65 @@ async function elevateAndQuit(): Promise<boolean> {
   }
 }
 
+function probeHttpUrl(url: string, timeoutMs = 1000): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const req = http.get(url, (res) => {
+        res.resume()
+        resolve((res.statusCode ?? 500) < 500)
+      })
+      req.on('error', () => resolve(false))
+      req.setTimeout(timeoutMs, () => {
+        req.destroy()
+        resolve(false)
+      })
+    } catch {
+      resolve(false)
+    }
+  })
+}
+
+async function loadRenderer(win: BrowserWindow) {
+  const candidates: string[] = []
+  const known = getViteDevServerUrl()
+  if (known) candidates.push(known)
+  if (!app.isPackaged) {
+    for (const port of [5173, 5174, 5175, 5176]) {
+      const url = `http://127.0.0.1:${port}/`
+      if (!candidates.includes(url)) candidates.push(url)
+    }
+  }
+
+  for (const url of candidates) {
+    if (!(await probeHttpUrl(url))) continue
+    try {
+      await win.loadURL(url)
+      persistViteDevServerUrl(url)
+      return
+    } catch (error) {
+      console.error('failed to load vite url', url, error)
+    }
+  }
+
+  const distIndex = path.join(__dirname, '../dist/index.html')
+  if (fs.existsSync(distIndex)) {
+    try {
+      await win.loadFile(distIndex)
+      return
+    } catch (error) {
+      console.error('failed to load dist index', error)
+    }
+  }
+
+  const message =
+    '画面の読み込みに失敗しました。ターミナルで npm run dev が動いているか確認して、もう一度開き直してください。'
+  await win.loadURL(
+    `data:text/html;charset=utf-8,${encodeURIComponent(
+      `<!doctype html><html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#eef3f7;color:#1c2430"><h2>PCの健康チェッカー</h2><p>${message}</p></body></html>`,
+    )}`,
+  )
+}
+
 function createWindow() {
   const iconPath = resolveAppIconPath()
   mainWindow = new BrowserWindow({
@@ -502,12 +600,7 @@ function createWindow() {
     mainWindow?.show()
   })
 
-  const viteUrl = getViteDevServerUrl()
-  if (viteUrl) {
-    void mainWindow.loadURL(viteUrl)
-  } else {
-    void mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
-  }
+  void loadRenderer(mainWindow)
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
