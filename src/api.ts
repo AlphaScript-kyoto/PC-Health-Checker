@@ -68,7 +68,11 @@ export async function getStatus() {
 }
 
 export async function postScan() {
-  return api.post<import('./types').StatusPayload>('/api/scan')
+  return api.post<{ ok?: boolean; started?: boolean; message?: string }>('/api/scan')
+}
+
+export async function getScanProgress() {
+  return api.get<import('./types').ScanProgressInfo>('/api/scan/progress')
 }
 
 export async function getAlerts() {

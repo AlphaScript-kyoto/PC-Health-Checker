@@ -119,6 +119,7 @@ def collect_inventory() -> dict[str, Any]:
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
 $cs = Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer, Model, TotalPhysicalMemory
 $os = Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, LastBootUpTime
+$bb = Get-CimInstance Win32_BaseBoard | Select-Object -First 1 Manufacturer, Product, Version
 $dimms = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object {
   [PSCustomObject]@{
     Capacity = [int64]$_.Capacity
@@ -153,23 +154,46 @@ $gpus = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_
   Gpus = $gpus
   OsCaption = $os.Caption
   OsVersion = $os.Version
+  BoardManufacturer = $bb.Manufacturer
+  BoardProduct = $bb.Product
+  BoardVersion = $bb.Version
 } | ConvertTo-Json -Compress -Depth 4
 """
     data = _run_ps(script)
     mem = psutil.virtual_memory()
+    cpu_name = (data.get("CpuName") or platform.processor() or "").strip() or None
+    os_caption = (data.get("OsCaption") or "").strip() or None
+    os_version = (data.get("OsVersion") or "").strip() or None
+    board_mfr = (data.get("BoardManufacturer") or "").strip()
+    board_product = (data.get("BoardProduct") or "").strip()
+    board_version = (data.get("BoardVersion") or "").strip()
+    motherboard_parts = [p for p in (board_mfr, board_product) if p and p.lower() not in ("to be filled by o.e.m.", "oem", "unknown")]
+    motherboard = " ".join(motherboard_parts) if motherboard_parts else None
+    if motherboard and board_version and board_version.lower() not in ("to be filled by o.e.m.", "oem", "unknown"):
+        motherboard = f"{motherboard} ({board_version})"
+
+    total_memory_gb = round((data.get("TotalMemoryBytes") or mem.total) / (1024**3), 1)
+    memory_summary = _memory_summary(data.get("MemoryModules"))
+    gpu_summary = _gpu_summary(data.get("Gpus"))
+
     return {
         "hostname": platform.node(),
         "platform": platform.platform(),
-        "cpu_name": data.get("CpuName") or platform.processor(),
+        "cpu_name": cpu_name,
+        "cpu": cpu_name,  # UI 互換
         "cores": data.get("Cores"),
         "logical_processors": data.get("LogicalProcessors"),
         "max_clock_mhz": data.get("MaxClockMHz"),
         "manufacturer": data.get("Manufacturer"),
         "model": data.get("Model"),
-        "total_memory_gb": round((data.get("TotalMemoryBytes") or mem.total) / (1024**3), 1),
+        "motherboard": motherboard,
+        "total_memory_gb": total_memory_gb,
+        "ram_gb": total_memory_gb,  # UI 互換
         "memory_used_pct": mem.percent,
-        "memory_summary": _memory_summary(data.get("MemoryModules")),
-        "gpu_summary": _gpu_summary(data.get("Gpus")),
-        "os_caption": data.get("OsCaption"),
-        "os_version": data.get("OsVersion"),
+        "memory_summary": memory_summary,
+        "gpu_summary": gpu_summary,
+        "gpu": gpu_summary,  # UI 互換
+        "os_caption": os_caption,
+        "os_version": os_version,
+        "os": os_caption,  # UI 互換
     }

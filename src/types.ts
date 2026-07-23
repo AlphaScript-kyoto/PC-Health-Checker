@@ -66,12 +66,30 @@ export interface DiskInfo {
 export interface InventoryInfo {
   hostname?: string
   os?: string
+  os_caption?: string
+  os_version?: string
   cpu?: string
+  cpu_name?: string
   ram_gb?: number
+  total_memory_gb?: number
   memory_summary?: string
+  memory_used_pct?: number
   gpu?: string
+  gpu_summary?: string
   motherboard?: string
+  manufacturer?: string
+  model?: string
   [key: string]: unknown
+}
+
+export interface ScanProgressInfo {
+  running: boolean
+  phase?: string
+  percent?: number
+  message?: string
+  error?: string | null
+  started_at?: string | null
+  finished_at?: string | null
 }
 
 export interface VolumeIssue {

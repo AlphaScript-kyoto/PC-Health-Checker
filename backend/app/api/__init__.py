@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app import db
-from app.scanner import get_last_scan, run_scan
+from app.scanner import get_last_scan, get_scan_progress, run_scan, start_scan
 
 app = FastAPI(title="PC Health Checker", docs_url="/api/docs")
 app.add_middleware(
@@ -92,6 +92,18 @@ def api_status() -> dict[str, Any]:
 
 @app.post("/api/scan")
 def api_scan() -> dict[str, Any]:
+    """健康診断スキャンをバックグラウンド開始。進捗は GET /api/scan/progress。"""
+    return start_scan(notify_alerts=True)
+
+
+@app.get("/api/scan/progress")
+def api_scan_progress() -> dict[str, Any]:
+    return get_scan_progress()
+
+
+@app.post("/api/scan/sync")
+def api_scan_sync() -> dict[str, Any]:
+    """互換用: 完了まで待って結果を返す。"""
     return run_scan(notify_alerts=True)
 
 

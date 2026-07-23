@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getAbout, postScan } from './api'
+import { getAbout, getScanProgress, postScan } from './api'
 import { PageErrorBoundary } from './components/PageErrorBoundary'
 import { Toast } from './components/Toast'
 import { DisksPage } from './pages/DisksPage'
@@ -9,7 +9,7 @@ import { PricesPage } from './pages/PricesPage'
 import { RecommendationsPage } from './pages/RecommendationsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { SpacePage } from './pages/SpacePage'
-import type { TabId } from './types'
+import type { ScanProgressInfo, TabId } from './types'
 import './App.css'
 
 const TABS: { id: TabId; label: string }[] = [
@@ -27,6 +27,7 @@ export default function App() {
   const [deepLinkDrive, setDeepLinkDrive] = useState<string | null>(null)
   const [elevated, setElevated] = useState(true)
   const [scanning, setScanning] = useState(false)
+  const [scanProgress, setScanProgress] = useState<ScanProgressInfo | null>(null)
   const [elevating, setElevating] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
@@ -69,16 +70,45 @@ export default function App() {
   const runScan = async () => {
     if (scanning) return
     setScanning(true)
+    setScanProgress({
+      running: true,
+      phase: 'queued',
+      percent: 1,
+      message: 'スキャンを準備中…',
+    })
     showToast('スキャンを開始しました…')
     try {
       await postScan()
-      setRefreshKey((k) => k + 1)
-      showToast('スキャンが完了しました')
+      // 進捗をポーリング（SMART 取得などで数十秒かかることがある）
+      for (;;) {
+        await new Promise((r) => window.setTimeout(r, 400))
+        const progress = await getScanProgress()
+        setScanProgress(progress)
+        if (!progress.running) {
+          if (progress.error) {
+            showToast(`スキャンに失敗しました: ${progress.error}`)
+          } else {
+            setRefreshKey((k) => k + 1)
+            showToast('スキャンが完了しました')
+          }
+          break
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       showToast(`スキャンに失敗しました: ${message}`)
+      setScanProgress({
+        running: false,
+        phase: 'error',
+        percent: 0,
+        message: 'スキャンに失敗しました',
+        error: message,
+      })
     } finally {
       setScanning(false)
+      window.setTimeout(() => {
+        setScanProgress((current) => (current?.running ? current : null))
+      }, 1800)
     }
   }
 
@@ -155,10 +185,29 @@ export default function App() {
               disabled={scanning}
             >
               {scanning && <span className="btn-spinner" aria-hidden />}
-              今すぐスキャン
+              {scanning
+                ? `スキャン中 ${Math.round(scanProgress?.percent ?? 0)}%`
+                : '今すぐスキャン'}
             </button>
           </div>
         </header>
+
+        {scanProgress && (scanning || scanProgress.message) && (
+          <div className={`scan-banner ${scanProgress.error ? 'is-error' : ''} ${!scanning && !scanProgress.error ? 'is-done' : ''}`}>
+            <div className="scan-banner-text">
+              <strong>{scanning ? 'スキャン実行中' : scanProgress.error ? 'スキャン失敗' : 'スキャン完了'}</strong>
+              <span>{scanProgress.message || '処理しています…'}</span>
+            </div>
+            <div className="progress-block" style={{ marginTop: 0, flex: 1, minWidth: 160 }}>
+              <div className="progress-track" aria-hidden>
+                <i style={{ width: `${Math.max(4, scanProgress.percent ?? 0)}%` }} />
+              </div>
+              <p className="muted" style={{ margin: '6px 0 0', fontSize: 12 }}>
+                {Math.round(scanProgress.percent ?? 0)}%
+              </p>
+            </div>
+          </div>
+        )}
 
         <main className="page-area" key={`${tab}-${refreshKey}`}>
           <PageErrorBoundary

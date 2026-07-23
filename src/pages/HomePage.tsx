@@ -102,21 +102,35 @@ export function HomePage({
           <div className="stack" style={{ marginTop: 8 }}>
             <div className="list-row">
               <span>CPU</span>
-              <strong>{String(inventory.cpu || '—')}</strong>
+              <strong>
+                {String(inventory.cpu_name || inventory.cpu || '—')}
+              </strong>
             </div>
             <div className="list-row">
               <span>メモリ</span>
               <strong>
                 {inventory.memory_summary
                   ? String(inventory.memory_summary)
-                  : inventory.ram_gb
-                    ? `${inventory.ram_gb} GB`
+                  : inventory.total_memory_gb || inventory.ram_gb
+                    ? `${inventory.total_memory_gb || inventory.ram_gb} GB`
                     : '—'}
               </strong>
             </div>
             <div className="list-row">
+              <span>GPU</span>
+              <strong>
+                {String(inventory.gpu_summary || inventory.gpu || '—')}
+              </strong>
+            </div>
+            <div className="list-row">
+              <span>マザーボード</span>
+              <strong>{String(inventory.motherboard || '—')}</strong>
+            </div>
+            <div className="list-row">
               <span>OS</span>
-              <strong>{String(inventory.os || '—')}</strong>
+              <strong>
+                {String(inventory.os_caption || inventory.os || '—')}
+              </strong>
             </div>
             <div className="list-row">
               <span>ホスト名</span>
