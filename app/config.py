@@ -23,7 +23,7 @@ def _data_dir() -> Path:
 
 
 APP_NAME = "PC Health"
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 APP_AUTHOR = "Alpha Script"
 APP_HOMEPAGE = "https://alphascript-kyoto.github.io/as-homepage/"
 APP_CONTACT = ""
@@ -38,8 +38,8 @@ DATA_DIR = _data_dir()
 UI_DIR = APP_DIR / "ui"
 DB_PATH = DATA_DIR / "health.db"
 
-# Scan interval in seconds (15 minutes)
-SCAN_INTERVAL_SEC = 15 * 60
+# Fallback wait if scheduler math fails (seconds)
+SCAN_INTERVAL_SEC = 60
 
 # Default thresholds (percent free space)
 DEFAULT_SETTINGS = {
@@ -51,7 +51,7 @@ DEFAULT_SETTINGS = {
     "prefer_media": "ssd",  # ssd | hdd | either
     "capacity_preference_tb": 2.0,
     "priority": "speed",  # speed | quiet | capacity | price
-    "scan_interval_min": 15,
+    "daily_scan_time": "09:00",  # local HH:MM — scan once at app start, then daily at this time
     "startup_enabled": False,
 }
 

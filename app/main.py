@@ -7,6 +7,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import Any
 
 # Ensure project root is on sys.path when launched as script
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,25 +81,72 @@ def _update_tray_status(status: str) -> None:
             pass
 
 
+def _parse_daily_scan_time(value: Any) -> tuple[int, int]:
+    """Return (hour, minute) from 'HH:MM'. Falls back to 09:00."""
+    text = str(value or "09:00").strip()
+    try:
+        hour_s, minute_s = text.split(":", 1)
+        hour = int(hour_s)
+        minute = int(minute_s)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+    except Exception:
+        pass
+    return 9, 0
+
+
+def _run_scan_jobs(label: str) -> None:
+    result = run_scan(notify_alerts=True)
+    log.info("%s: %s", label, result.get("overall_status"))
+    try:
+        from app.price_tracker import maybe_weekly_price_job
+
+        maybe_weekly_price_job()
+    except Exception:
+        log.exception("Weekly price job failed")
+
+
 def _scheduler_loop() -> None:
+    """Scan once at startup, then once each day at the configured local time."""
+    from datetime import datetime, timedelta
+
     time.sleep(2)
+    last_daily_scan_date = None
+    try:
+        _run_scan_jobs("Startup scan")
+        settings = db.get_settings()
+        hour, minute = _parse_daily_scan_time(settings.get("daily_scan_time"))
+        now = datetime.now()
+        target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        # Startup already covered today if the scheduled time has passed.
+        if now >= target_today:
+            last_daily_scan_date = now.date()
+    except Exception:
+        log.exception("Startup scan failed")
+
     while not _scheduler_stop.is_set():
         try:
             settings = db.get_settings()
-            interval = int(settings.get("scan_interval_min") or 15) * 60
-            interval = max(interval, 60)
-            result = run_scan(notify_alerts=True)
-            log.info("Scheduled scan: %s", result.get("overall_status"))
-            try:
-                from app.price_tracker import maybe_weekly_price_job
+            hour, minute = _parse_daily_scan_time(settings.get("daily_scan_time"))
+            now = datetime.now()
+            today = now.date()
+            target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-                maybe_weekly_price_job()
-            except Exception:
-                log.exception("Weekly price job failed")
+            if now >= target_today and last_daily_scan_date != today:
+                _run_scan_jobs("Daily scheduled scan")
+                last_daily_scan_date = today
+
+            if last_daily_scan_date == today:
+                next_target = target_today + timedelta(days=1)
+            else:
+                next_target = target_today
+            wait = (next_target - datetime.now()).total_seconds()
+            # Wake often so setting changes apply without restart.
+            wait = min(30.0, max(1.0, wait if wait > 0 else 1.0))
         except Exception:
             log.exception("Scheduled scan failed")
-            interval = SCAN_INTERVAL_SEC
-        _scheduler_stop.wait(interval)
+            wait = float(SCAN_INTERVAL_SEC)
+        _scheduler_stop.wait(wait)
 
 
 def _run_server() -> None:

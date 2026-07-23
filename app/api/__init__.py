@@ -24,8 +24,18 @@ class SettingsUpdate(BaseModel):
     prefer_media: str | None = None
     capacity_preference_tb: float | None = Field(None, ge=0.1, le=20)
     priority: str | None = None
-    scan_interval_min: int | None = Field(None, ge=5, le=1440)
+    daily_scan_time: str | None = None
     startup_enabled: bool | None = None
+
+
+def _valid_daily_scan_time(value: str) -> bool:
+    try:
+        hour_s, minute_s = value.strip().split(":", 1)
+        hour = int(hour_s)
+        minute = int(minute_s)
+        return 0 <= hour <= 23 and 0 <= minute <= 59 and len(minute_s) == 2
+    except Exception:
+        return False
 
 
 @app.get("/api/health")
@@ -106,6 +116,11 @@ def api_put_settings(body: SettingsUpdate) -> dict[str, Any]:
         "price",
     ):
         raise HTTPException(400, "priority must be speed|quiet|capacity|price")
+    if "daily_scan_time" in updates:
+        raw = str(updates["daily_scan_time"]).strip()
+        if not _valid_daily_scan_time(raw):
+            raise HTTPException(400, "daily_scan_time must be HH:MM (24-hour)")
+        updates["daily_scan_time"] = f"{int(raw.split(':')[0]):02d}:{int(raw.split(':')[1]):02d}"
     settings = db.update_settings(updates)
     if "startup_enabled" in updates:
         from app.startup import set_startup

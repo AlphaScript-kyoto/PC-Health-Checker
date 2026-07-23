@@ -291,7 +291,7 @@ DEMO_JS = r"""
     set('capacity_warn_pct', 15);
     set('capacity_critical_pct', 8);
     set('budget_max_yen', 30000);
-    set('scan_interval_min', 30);
+    set('daily_scan_time', '09:00');
     set('prefer_new_used', 'new');
     set('prefer_media', 'ssd');
     set('capacity_preference_tb', '2');

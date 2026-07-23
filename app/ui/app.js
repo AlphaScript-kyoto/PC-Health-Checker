@@ -463,7 +463,11 @@ function fillSettings(s) {
     if (!el) continue;
     if (el.type === "checkbox") el.checked = Boolean(v);
     else if (k === "capacity_preference_tb") el.value = nearestCapacityOption(v);
-    else el.value = v;
+    else if (k === "daily_scan_time") {
+      const raw = String(v || "09:00");
+      const m = raw.match(/^(\d{1,2}):(\d{2})/);
+      el.value = m ? `${String(Number(m[1])).padStart(2, "0")}:${m[2]}` : "09:00";
+    } else el.value = v;
   }
 }
 
@@ -759,13 +763,13 @@ $("#settingsForm").addEventListener("submit", async (e) => {
     prefer_media: form.prefer_media.value,
     capacity_preference_tb: Number(form.capacity_preference_tb.value),
     priority: form.priority.value,
-    scan_interval_min: Number(form.scan_interval_min.value),
+    daily_scan_time: form.daily_scan_time.value,
     startup_enabled: form.startup_enabled.checked,
   };
   try {
     const saved = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     fillSettings(saved);
-    $("#settingsMsg").textContent = "保存しました。スキャン間隔の変更は次回起動から、またはプロセス再起動後に反映されます。";
+    $("#settingsMsg").textContent = "保存しました。起動時に1回スキャンし、以降は毎日この時刻に自動スキャンします（アプリ常駐中）。";
   } catch (err) {
     $("#settingsMsg").textContent = "保存失敗: " + err.message;
   }
