@@ -20,9 +20,29 @@ const PORT = 8787
 const BASE = `http://${HOST}:${PORT}`
 const APP_TITLE = 'PCの健康チェッカー'
 const VITE_ARG_PREFIX = '--pchc-vite='
-/** 昇格引き継ぎ用（旧PIDの強制終了・成功通知） */
-const ELEVATE_MARKER = path.join(os.tmpdir(), 'pchc-elevate-marker.json')
-const ELEVATE_READY = path.join(os.tmpdir(), 'pchc-elevate-ready.txt')
+
+/** 通常起動と管理者起動で Temp が違うことがあるため、LOCALAPPDATA に置く */
+function elevateStateDir(): string {
+  const base =
+    process.env.LOCALAPPDATA ||
+    process.env.USERPROFILE ||
+    os.tmpdir()
+  const dir = path.join(base, 'PCHealthChecker')
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+  } catch {
+    // ignore
+  }
+  return dir
+}
+
+function elevateMarkerPath(): string {
+  return path.join(elevateStateDir(), 'elevate-marker.json')
+}
+
+function elevateReadyPath(): string {
+  return path.join(elevateStateDir(), 'elevate-ready.txt')
+}
 
 /** dist-electron の親 = プロジェクトルート */
 const ROOT = path.join(__dirname, '..')
@@ -196,9 +216,9 @@ type ElevateMarker = { oldPid: number; at: number }
 
 function writeElevateMarker(oldPid: number) {
   const data: ElevateMarker = { oldPid, at: Date.now() }
-  fs.writeFileSync(ELEVATE_MARKER, JSON.stringify(data), 'utf8')
+  fs.writeFileSync(elevateMarkerPath(), JSON.stringify(data), 'utf8')
   try {
-    fs.unlinkSync(ELEVATE_READY)
+    fs.unlinkSync(elevateReadyPath())
   } catch {
     // ignore
   }
@@ -206,7 +226,7 @@ function writeElevateMarker(oldPid: number) {
 
 function readElevateMarker(): ElevateMarker | null {
   try {
-    const raw = JSON.parse(fs.readFileSync(ELEVATE_MARKER, 'utf8')) as ElevateMarker
+    const raw = JSON.parse(fs.readFileSync(elevateMarkerPath(), 'utf8')) as ElevateMarker
     if (!raw?.oldPid || !raw?.at) return null
     // 2分以上前のマーカーは無視
     if (Date.now() - raw.at > 120000) return null
@@ -217,7 +237,7 @@ function readElevateMarker(): ElevateMarker | null {
 }
 
 function clearElevateMarker() {
-  for (const p of [ELEVATE_MARKER, ELEVATE_READY]) {
+  for (const p of [elevateMarkerPath(), elevateReadyPath()]) {
     try {
       fs.unlinkSync(p)
     } catch {
@@ -227,12 +247,12 @@ function clearElevateMarker() {
 }
 
 function markElevateReady() {
-  fs.writeFileSync(ELEVATE_READY, String(Date.now()), 'utf8')
+  fs.writeFileSync(elevateReadyPath(), String(Date.now()), 'utf8')
 }
 
 function isElevateReady(): boolean {
   try {
-    const t = Number(fs.readFileSync(ELEVATE_READY, 'utf8'))
+    const t = Number(fs.readFileSync(elevateReadyPath(), 'utf8'))
     return Number.isFinite(t) && Date.now() - t < 120000
   } catch {
     return false
@@ -254,7 +274,6 @@ function killProcessTree(pid: number) {
 
 /**
  * 管理者で起動した瞬間に、昇格前プロセスを強制終了する。
- * （旧側の PowerShell -Wait が宙吊りになりウィンドウが残る問題の対策）
  */
 function takeoverFromNonElevatedPredecessor() {
   if (!isAdmin()) return
@@ -267,7 +286,7 @@ function takeoverFromNonElevatedPredecessor() {
   killOtherAppElectronProcesses()
 
   try {
-    fs.unlinkSync(ELEVATE_MARKER)
+    fs.unlinkSync(elevateMarkerPath())
   } catch {
     // ignore
   }
@@ -300,15 +319,19 @@ Get-CimInstance Win32_Process | Where-Object {
 }
 
 /**
- * UAC ダイアログだけ起動する（完了を待たない）。
- * -Wait すると Electron まで待ち続け、旧ウィンドウが残るため待たない。
+ * UAC → 昇格ワーカー起動。
+ * ワーカーは Electron を起動した直後に ready を書いて終了する。
+ * Node 側は「ワーカー終了」と「ready ファイル」の早い方で先へ進む（宙吊り対策）。
  */
-function spawnElevatedNoWait(): boolean {
-  if (process.platform !== 'win32') return false
-
+function spawnElevatedWithUac(): {
+  waitExit: Promise<number>
+  workerPath: string
+  launcherPath: string
+} {
   const exe = process.execPath
   const workDir = ROOT
   const viteUrl = getViteDevServerUrl() ?? ''
+  const readyFile = elevateReadyPath()
 
   const baseArgs = process.argv
     .slice(1)
@@ -321,7 +344,8 @@ function spawnElevatedNoWait(): boolean {
 
   const argListPs = electronArgs.map(quoteForPsSingle).join(', ')
   const stamp = `${process.pid}-${Date.now()}`
-  const workerPath = path.join(os.tmpdir(), `pchc-elevated-${stamp}.ps1`)
+  const workerPath = path.join(elevateStateDir(), `elevated-worker-${stamp}.ps1`)
+  const launcherPath = path.join(elevateStateDir(), `elevate-launch-${stamp}.ps1`)
 
   const elevatedWorker = `
 $ErrorActionPreference = 'Stop'
@@ -340,83 +364,113 @@ if ($argList.Count -gt 0) {
   }) -join ' '
 }
 [void][System.Diagnostics.Process]::Start($psi)
+# 通常/管理者で Temp が違っても読める場所へ ready を書く
+$readyMs = [string][int64]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalMilliseconds
+Set-Content -LiteralPath ${quoteForPsSingle(readyFile)} -Value $readyMs -Encoding ASCII
 Remove-Item -LiteralPath ${quoteForPsSingle(workerPath)} -Force -ErrorAction SilentlyContinue
 [Environment]::Exit(0)
 `.trim()
 
-  try {
-    fs.writeFileSync(workerPath, elevatedWorker, 'utf8')
-    // UAC だけ出して即座に戻る（-Wait しない）
+  const launcher = `
+$ErrorActionPreference = 'Stop'
+try {
+  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',${quoteForPsSingle(workerPath)})
+  if ($null -eq $p) { exit 1 }
+  exit $(if ($null -eq $p.ExitCode) { 0 } else { $p.ExitCode })
+} catch {
+  exit 1
+}
+`.trim()
+
+  fs.writeFileSync(workerPath, elevatedWorker, 'utf8')
+  fs.writeFileSync(launcherPath, launcher, 'utf8')
+
+  const waitExit = new Promise<number>((resolve) => {
     const child = spawn(
       'powershell.exe',
-      [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        `Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',${quoteForPsSingle(workerPath)})`,
-      ],
-      { windowsHide: true, stdio: 'ignore', detached: true },
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', launcherPath],
+      { windowsHide: true, stdio: 'ignore' },
     )
-    child.unref()
-    return true
-  } catch (error) {
-    console.error('elevation spawn failed', error)
-    try {
-      fs.unlinkSync(workerPath)
-    } catch {
-      // ignore
-    }
-    return false
-  }
+    child.on('error', () => resolve(1))
+    child.on('exit', (code) => resolve(code ?? 1))
+  })
+
+  return { waitExit, workerPath, launcherPath }
 }
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms))
 }
 
+async function waitForElevateReady(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (isElevateReady()) return true
+    await sleep(150)
+  }
+  return false
+}
+
 /**
  * 管理者として立ち上げ直す。
- * 1) 旧PIDをマーカーに書く
- * 2) UAC を待つ（待たない起動）
- * 3) 昇格プロセスが旧PIDを taskkill する
- * 4) ready を確認したら自分も終了（殺し損ね対策）
  */
 async function elevateAndQuit(): Promise<boolean> {
+  if (process.platform !== 'win32') return false
   if (isAdmin()) return true
 
   stopBackend()
   writeElevateMarker(process.pid)
   app.releaseSingleInstanceLock()
 
-  const spawned = spawnElevatedNoWait()
-  if (!spawned) {
-    clearElevateMarker()
-    app.requestSingleInstanceLock()
-    startBackend()
-    return false
-  }
+  let workerPath = ''
+  let launcherPath = ''
+  try {
+    const spawned = spawnElevatedWithUac()
+    workerPath = spawned.workerPath
+    launcherPath = spawned.launcherPath
 
-  // 昇格側が ready を書くか、自分が高々殺されるまで待つ
-  const deadline = Date.now() + 120000
-  while (Date.now() < deadline) {
-    if (isElevateReady()) {
+    // UAC キャンセルは waitExit、成功は ready（ワーカーが書く）か waitExit の早い方
+    const outcome = await Promise.race([
+      spawned.waitExit.then((code) => ({ kind: 'exit' as const, code })),
+      waitForElevateReady(180000).then((ok) => ({ kind: 'ready' as const, ok })),
+    ])
+
+    // ready があれば成功。exit 0 も成功。exit 非0 でも直前に ready が書かれていれば成功。
+    const success =
+      isElevateReady() ||
+      (outcome.kind === 'ready' && outcome.ok) ||
+      (outcome.kind === 'exit' && outcome.code === 0)
+
+    if (success) {
       try {
         mainWindow?.hide()
       } catch {
         // ignore
       }
-      setTimeout(() => forceQuitApp(), 50)
+      setTimeout(() => forceQuitApp(), 80)
       return true
     }
-    await sleep(200)
-  }
 
-  // UAC キャンセル or 失敗
-  clearElevateMarker()
-  app.requestSingleInstanceLock()
-  startBackend()
-  return false
+    clearElevateMarker()
+    app.requestSingleInstanceLock()
+    startBackend()
+    return false
+  } catch (error) {
+    console.error('elevation failed', error)
+    clearElevateMarker()
+    app.requestSingleInstanceLock()
+    startBackend()
+    return false
+  } finally {
+    for (const p of [workerPath, launcherPath]) {
+      if (!p) continue
+      try {
+        fs.unlinkSync(p)
+      } catch {
+        // ignore
+      }
+    }
+  }
 }
 
 function createWindow() {
