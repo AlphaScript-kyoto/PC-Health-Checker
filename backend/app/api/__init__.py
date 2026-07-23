@@ -104,7 +104,7 @@ def api_scan_progress() -> dict[str, Any]:
 @app.post("/api/scan/sync")
 def api_scan_sync() -> dict[str, Any]:
     """互換用: 完了まで待って結果を返す。"""
-    return run_scan(notify_alerts=True)
+    return run_scan(notify_alerts=True, include_maps=True)
 
 
 @app.get("/api/settings")

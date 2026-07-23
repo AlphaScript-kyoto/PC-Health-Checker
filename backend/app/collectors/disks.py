@@ -258,7 +258,248 @@ def _parse_smartctl(text: str) -> dict[str, Any]:
             except (TypeError, ValueError):
                 pass
 
+    _merge_identity(smart, _parse_identity_from_text(text))
     return smart
+
+
+def _gbps_to_sata_mode(gbps: float | None) -> str | None:
+    if gbps is None:
+        return None
+    # CrystalDiskInfo 風: 1.5→SATA/150, 3.0→SATA/300, 6.0→SATA/600
+    code = int(round(gbps * 100))
+    if code <= 0:
+        return None
+    return f"SATA/{code}"
+
+
+def _parse_gbps(text: str | None) -> float | None:
+    if not text:
+        return None
+    m = re.search(r"([\d.]+)\s*Gb/?s", text, re.I)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _parse_identity_from_text(text: str) -> dict[str, Any]:
+    """smartctl -i / -a のテキストから CrystalDiskInfo 相当の識別情報を拾う。"""
+    ident: dict[str, Any] = {}
+    features: list[str] = []
+
+    m = re.search(r"ATA Version is:\s*(.+)", text, re.I)
+    if m:
+        ident["ata_standard"] = m.group(1).strip()
+    m = re.search(r"SATA Version is:\s*(.+)", text, re.I)
+    if m:
+        line = m.group(1).strip()
+        ident["sata_version"] = line
+        cur = re.search(r"current:\s*([\d.]+)\s*Gb/?s", line, re.I)
+        if cur:
+            try:
+                ident["transfer_mode"] = _gbps_to_sata_mode(float(cur.group(1)))
+            except ValueError:
+                pass
+        elif not ident.get("transfer_mode"):
+            ident["transfer_mode"] = _gbps_to_sata_mode(_parse_gbps(line))
+    m = re.search(r"Rotation Rate:\s*(.+)", text, re.I)
+    if m:
+        rr = m.group(1).strip()
+        if re.search(r"Solid State|SSD|0\s*rpm", rr, re.I):
+            ident["rotation_rate"] = 0
+            ident["rotation_label"] = "SSD（回転なし）"
+        else:
+            num = re.search(r"(\d+)", rr)
+            if num:
+                ident["rotation_rate"] = int(num.group(1))
+                ident["rotation_label"] = f"{num.group(1)} rpm"
+            else:
+                ident["rotation_label"] = rr
+    m = re.search(r"Form Factor:\s*(.+)", text, re.I)
+    if m:
+        ident["form_factor"] = m.group(1).strip()
+    m = re.search(r"Buffer Size:\s*(.+)", text, re.I)
+    if m:
+        buf = m.group(1).strip()
+        if re.search(r"unavailable|unknown|---|N/?A", buf, re.I):
+            ident["buffer_size_kb"] = None
+        else:
+            num = re.search(r"([\d.]+)", buf)
+            if num:
+                try:
+                    # 単位が bytes の場合もあるが、多くは kBytes
+                    val = float(num.group(1))
+                    if re.search(r"byte", buf, re.I) and not re.search(r"k", buf, re.I):
+                        val = val / 1024.0
+                    ident["buffer_size_kb"] = int(val)
+                except ValueError:
+                    pass
+    m = re.search(r"NV Cache Size:\s*(.+)", text, re.I)
+    if m:
+        nv = m.group(1).strip()
+        if not re.search(r"unavailable|unknown|---|N/?A", nv, re.I):
+            ident["nv_cache_size"] = nv
+
+    if re.search(r"SMART support is:\s*Available", text, re.I) or re.search(
+        r"SMART support is:\s*Enabled", text, re.I
+    ):
+        features.append("S.M.A.R.T.")
+    if re.search(r"48[- ]bit\s+(Address|LBA)|LBA\s*48", text, re.I):
+        features.append("48bit LBA")
+    if re.search(r"Advanced Power Management|\bAPM\b", text, re.I):
+        features.append("APM")
+    if re.search(r"Automatic Acoustic Management|\bAAM\b", text, re.I):
+        features.append("AAM")
+    if re.search(r"\bNCQ\b|Native Command Queuing", text, re.I):
+        features.append("NCQ")
+    if re.search(r"\bTRIM\b|Deterministic.*Trim|Data Set Management", text, re.I):
+        features.append("TRIM")
+    if re.search(r"Device supports DSM|TRIM supported", text, re.I):
+        if "TRIM" not in features:
+            features.append("TRIM")
+
+    # インターフェース表記
+    if ident.get("sata_version") or ident.get("transfer_mode"):
+        ident["interface"] = "Serial ATA"
+    elif re.search(r"NVMe", text, re.I):
+        ident["interface"] = "NVM Express"
+    elif re.search(r"Transport protocol:\s*SAS", text, re.I):
+        ident["interface"] = "SAS"
+
+    if features:
+        # 順序を CrystalDiskInfo 風にそろえる
+        order = ["S.M.A.R.T.", "48bit LBA", "APM", "AAM", "NCQ", "TRIM"]
+        ordered = [f for f in order if f in features]
+        for f in features:
+            if f not in ordered:
+                ordered.append(f)
+        ident["features"] = ordered
+        ident["features_text"] = ", ".join(ordered)
+
+    return ident
+
+
+def _identity_from_smartctl_json(data: dict[str, Any]) -> dict[str, Any]:
+    """smartctl -j の JSON から識別情報を抽出する。"""
+    ident: dict[str, Any] = {}
+    features: list[str] = []
+
+    ata = data.get("ata_version")
+    if isinstance(ata, dict) and ata.get("string"):
+        ident["ata_standard"] = str(ata["string"]).strip()
+    elif isinstance(ata, str) and ata.strip():
+        ident["ata_standard"] = ata.strip()
+
+    sata = data.get("sata_version")
+    if isinstance(sata, dict) and sata.get("string"):
+        ident["sata_version"] = str(sata["string"]).strip()
+    elif isinstance(sata, str) and sata.strip():
+        ident["sata_version"] = sata.strip()
+
+    speed = data.get("interface_speed") or {}
+    current = speed.get("current") if isinstance(speed, dict) else None
+    if isinstance(current, dict):
+        cur_str = current.get("string")
+        units = current.get("units_per_second")
+        gbps = _parse_gbps(str(cur_str) if cur_str else None)
+        if gbps is None and isinstance(units, (int, float)):
+            # units_per_second が bit/s の場合もあるが、smartctl はしばしば Gb/s 文字列を持つ
+            try:
+                # 典型: 6000000000 → 6.0 Gb/s
+                if units >= 1_000_000_000:
+                    gbps = float(units) / 1_000_000_000.0
+            except Exception:
+                gbps = None
+        mode = _gbps_to_sata_mode(gbps)
+        if mode:
+            ident["transfer_mode"] = mode
+
+    device = data.get("device") or {}
+    protocol = str(device.get("protocol") or "").upper()
+    if protocol in ("ATA", "SAT", "USB"):
+        ident["interface"] = "Serial ATA"
+    elif protocol == "NVME":
+        ident["interface"] = "NVM Express"
+    elif protocol:
+        ident["interface"] = protocol
+
+    rr = data.get("rotation_rate")
+    if rr is not None:
+        try:
+            rr_i = int(rr)
+            ident["rotation_rate"] = rr_i
+            ident["rotation_label"] = "SSD（回転なし）" if rr_i == 0 else f"{rr_i} rpm"
+        except (TypeError, ValueError):
+            pass
+
+    if data.get("form_factor"):
+        ident["form_factor"] = data.get("form_factor")
+
+    smart_support = data.get("smart_support") or {}
+    if smart_support.get("available") or smart_support.get("enabled"):
+        features.append("S.M.A.R.T.")
+
+    # 能力フラグ（ある範囲で）
+    caps = ((data.get("ata_smart_data") or {}).get("capabilities")) or {}
+    if caps.get("attribute_autosave_enabled") is not None and "S.M.A.R.T." not in features:
+        features.append("S.M.A.R.T.")
+
+    trim = data.get("ata_device_statistics") or data.get("trim") or {}
+    if isinstance(trim, dict) and trim:
+        # TRIM 関連の統計やフラグがあれば
+        if any("trim" in str(k).lower() for k in trim.keys()):
+            features.append("TRIM")
+    if data.get("nvme_smart_health_information_log") is not None:
+        if "TRIM" not in features:
+            features.append("TRIM")
+        if "S.M.A.R.T." not in features:
+            features.append("S.M.A.R.T.")
+
+    # smartctl JSON に ncq 明示がある場合
+    for key in ("ncq", "sata_ncq", "native_command_queueing"):
+        if data.get(key):
+            features.append("NCQ")
+            break
+
+    # 48bit LBA はほぼ現行 HDD/SSD で前提。user_capacity が大きい場合に付与
+    capacity = ((data.get("user_capacity") or {}).get("bytes")) or 0
+    try:
+        if int(capacity) >= 137_438_953_472:  # > 128 GiB 相当なら 48bit LBA が実質必須
+            features.append("48bit LBA")
+    except (TypeError, ValueError):
+        pass
+
+    if features:
+        order = ["S.M.A.R.T.", "48bit LBA", "APM", "AAM", "NCQ", "TRIM"]
+        ordered = [f for f in order if f in features]
+        for f in features:
+            if f not in ordered:
+                ordered.append(f)
+        ident["features"] = ordered
+        ident["features_text"] = ", ".join(ordered)
+
+    return ident
+
+
+def _merge_identity(target: dict[str, Any], identity: dict[str, Any]) -> None:
+    for key, value in identity.items():
+        if value is None or value == "" or value == []:
+            continue
+        if key == "features" and target.get("features"):
+            # 和集合
+            merged = list(dict.fromkeys([*(target.get("features") or []), *value]))
+            order = ["S.M.A.R.T.", "48bit LBA", "APM", "AAM", "NCQ", "TRIM"]
+            ordered = [f for f in order if f in merged]
+            for f in merged:
+                if f not in ordered:
+                    ordered.append(f)
+            target["features"] = ordered
+            target["features_text"] = ", ".join(ordered)
+            continue
+        if target.get(key) in (None, "", [], "----"):
+            target[key] = value
 
 
 def _normalize_smartctl_json(data: dict[str, Any]) -> dict[str, Any]:
@@ -274,6 +515,7 @@ def _normalize_smartctl_json(data: dict[str, Any]) -> dict[str, Any]:
         "logical_block_size": (data.get("logical_block_size") or None),
         "user_capacity_bytes": ((data.get("user_capacity") or {}).get("bytes")),
     }
+    _merge_identity(smart, _identity_from_smartctl_json(data))
 
     status = (data.get("smart_status") or {}).get("passed")
     if status is True:
@@ -372,6 +614,23 @@ def _normalize_smartctl_json(data: dict[str, Any]) -> dict[str, Any]:
     return smart
 
 
+def _smartctl_identity_text(index: int) -> str:
+    """バッファサイズ・対応機能など、JSON に出にくい項目用の -i テキスト。"""
+    try:
+        result = subprocess.run(
+            ["smartctl", "-i", f"/dev/pd{index}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+        return result.stdout or ""
+    except Exception:
+        return ""
+
+
 def _collect_smart_for_index(index: int) -> dict[str, Any] | None:
     if not _smartctl_available():
         return None
@@ -390,7 +649,12 @@ def _collect_smart_for_index(index: int) -> dict[str, Any] | None:
         if out.startswith("{"):
             try:
                 data = json.loads(out)
-                return _normalize_smartctl_json(data)
+                smart = _normalize_smartctl_json(data)
+                # CrystalDiskInfo 相当の Buffer / Features をテキストからも補完
+                ident_text = _smartctl_identity_text(index)
+                if ident_text.strip():
+                    _merge_identity(smart, _parse_identity_from_text(ident_text))
+                return smart
             except json.JSONDecodeError:
                 pass
 
@@ -717,7 +981,7 @@ def collect_disks() -> list[dict[str, Any]]:
 Get-PhysicalDisk | Select-Object `
   @{N='DeviceId';E={[string]$_.DeviceId}},
   FriendlyName, Model, SerialNumber, MediaType, BusType,
-  HealthStatus, OperationalStatus, FirmwareVersion,
+  HealthStatus, OperationalStatus, FirmwareVersion, SpindleSpeed,
   @{N='SizeBytes';E={[int64]$_.Size}},
   @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}} |
   ConvertTo-Json -Compress -Depth 4
@@ -736,13 +1000,14 @@ Get-PhysicalDisk | Select-Object `
     for row in data:
         device_id = str(row.get("DeviceId", ""))
         model = row.get("Model") or row.get("FriendlyName") or "Unknown"
+        bus = row.get("BusType")
         disk: dict[str, Any] = {
             "device_id": device_id,
             "model": model,
             "friendly_name": row.get("FriendlyName"),
             "serial": row.get("SerialNumber"),
             "media_type": row.get("MediaType"),
-            "bus_type": row.get("BusType"),
+            "bus_type": bus,
             "health_status": row.get("HealthStatus"),
             "operational_status": row.get("OperationalStatus"),
             "firmware": row.get("FirmwareVersion"),
@@ -750,11 +1015,31 @@ Get-PhysicalDisk | Select-Object `
             "size_gb": row.get("SizeGB"),
             "smart": {},
         }
+        # OS 側の推測（smartctl が取れないときの下書き）
+        if bus:
+            bus_l = str(bus).lower()
+            if "nvme" in bus_l:
+                disk["interface"] = "NVM Express"
+            elif "sata" in bus_l or "ata" in bus_l:
+                disk["interface"] = "Serial ATA"
+            else:
+                disk["interface"] = str(bus)
+        spindle = row.get("SpindleSpeed")
+        if spindle is not None:
+            try:
+                sp = int(spindle)
+                disk["rotation_rate"] = sp
+                disk["rotation_label"] = "SSD（回転なし）" if sp == 0 else f"{sp} rpm"
+            except (TypeError, ValueError):
+                pass
 
         w32 = win32.get(device_id)
         pnp = None
         if w32:
             disk["interface_type"] = w32.get("InterfaceType")
+            if not disk.get("interface") and w32.get("InterfaceType"):
+                iface = str(w32.get("InterfaceType"))
+                disk["interface"] = "Serial ATA" if iface.upper() in ("IDE", "SCSI", "ATA") else iface
             disk["wmi_status"] = w32.get("Status")
             pnp = w32.get("PNPDeviceID")
             disk["pnp_device_id"] = pnp
@@ -838,6 +1123,28 @@ Get-PhysicalDisk | Select-Object `
 
         smart = _enrich_summary(smart)
         smart = _flag_critical_raw(smart)
+
+        # CrystalDiskInfo 風の識別項目をディスク直下にも展開（UI 用）
+        for key in (
+            "interface",
+            "transfer_mode",
+            "ata_standard",
+            "sata_version",
+            "features",
+            "features_text",
+            "buffer_size_kb",
+            "nv_cache_size",
+            "rotation_rate",
+            "rotation_label",
+            "form_factor",
+        ):
+            if smart.get(key) is not None and disk.get(key) in (None, "", []):
+                disk[key] = smart[key]
+        if not disk.get("firmware"):
+            disk["firmware"] = smart.get("firmware")
+        if not disk.get("serial"):
+            disk["serial"] = smart.get("serial")
+
         disk["smart"] = smart
         disks.append(disk)
 

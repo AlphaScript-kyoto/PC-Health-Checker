@@ -221,18 +221,44 @@ export default function App() {
         </header>
 
         {scanProgress && (scanning || scanProgress.message) && (
-          <div className={`scan-banner ${scanProgress.error ? 'is-error' : ''} ${!scanning && !scanProgress.error ? 'is-done' : ''}`}>
+          <div
+            className={`scan-banner scan-banner-dual ${scanProgress.error ? 'is-error' : ''} ${!scanning && !scanProgress.error ? 'is-done' : ''}`}
+          >
             <div className="scan-banner-text">
-              <strong>{scanning ? 'スキャン実行中' : scanProgress.error ? 'スキャン失敗' : 'スキャン完了'}</strong>
+              <strong>
+                {scanning ? '並行スキャン実行中' : scanProgress.error ? 'スキャン失敗' : 'スキャン完了'}
+              </strong>
               <span>{scanProgress.message || '処理しています…'}</span>
             </div>
-            <div className="progress-block" style={{ marginTop: 0, flex: 1, minWidth: 160 }}>
-              <div className="progress-track" aria-hidden>
-                <i style={{ width: `${Math.max(4, scanProgress.percent ?? 0)}%` }} />
+            <div className="scan-dual-bars">
+              <div className="progress-block" style={{ marginTop: 0 }}>
+                <div className="scan-bar-label">
+                  <span>健康診断</span>
+                  <span>{Math.round(scanProgress.health?.percent ?? (scanning ? scanProgress.percent ?? 0 : 100))}%</span>
+                </div>
+                <div className="progress-track" aria-label="健康診断の進捗">
+                  <i
+                    style={{
+                      width: `${Math.max(4, scanProgress.health?.percent ?? (scanning ? 8 : 100))}%`,
+                    }}
+                  />
+                </div>
+                <p className="muted scan-bar-msg">{scanProgress.health?.message || '—'}</p>
               </div>
-              <p className="muted" style={{ margin: '6px 0 0', fontSize: 12 }}>
-                {Math.round(scanProgress.percent ?? 0)}%
-              </p>
+              <div className="progress-block" style={{ marginTop: 0 }}>
+                <div className="scan-bar-label">
+                  <span>容量マップ</span>
+                  <span>{Math.round(scanProgress.mapping?.percent ?? 0)}%</span>
+                </div>
+                <div className="progress-track is-map" aria-label="容量マップの進捗">
+                  <i
+                    style={{
+                      width: `${Math.max(4, scanProgress.mapping?.percent ?? (scanning ? 4 : 100))}%`,
+                    }}
+                  />
+                </div>
+                <p className="muted scan-bar-msg">{scanProgress.mapping?.message || '—'}</p>
+              </div>
             </div>
           </div>
         )}

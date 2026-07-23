@@ -14,8 +14,11 @@ from app.recommend import build_recommendations
 
 _lock = threading.Lock()
 _scan_thread: threading.Thread | None = None
+_map_thread: threading.Thread | None = None
 _last_scan: dict[str, Any] | None = None
 _on_status_change: Callable[[str], None] | None = None
+
+_progress_lock = threading.Lock()
 _progress: dict[str, Any] = {
     "running": False,
     "phase": "idle",
@@ -24,8 +27,20 @@ _progress: dict[str, Any] = {
     "error": None,
     "started_at": None,
     "finished_at": None,
+    "health": {
+        "running": False,
+        "percent": 0,
+        "message": "",
+        "error": None,
+    },
+    "mapping": {
+        "running": False,
+        "percent": 0,
+        "message": "",
+        "error": None,
+        "current_drive": None,
+    },
 }
-_progress_lock = threading.Lock()
 
 
 def set_status_callback(cb: Callable[[str], None] | None) -> None:
@@ -39,10 +54,51 @@ def get_last_scan() -> dict[str, Any] | None:
 
 def get_scan_progress() -> dict[str, Any]:
     with _progress_lock:
-        return dict(_progress)
+        return {
+            **_progress,
+            "health": dict(_progress["health"]),
+            "mapping": dict(_progress["mapping"]),
+        }
 
 
-def _set_progress(
+def _recompute_overall(*, finished_error: str | None = None) -> None:
+    """健康診断・マッピングの両トラックから全体進捗を合成する。"""
+    health = _progress["health"]
+    mapping = _progress["mapping"]
+    h_pct = int(health.get("percent") or 0)
+    m_pct = int(mapping.get("percent") or 0)
+    # 健康診断の体感をやや重めに（SMART 取得が重いため）
+    overall = int(h_pct * 0.55 + m_pct * 0.45)
+    _progress["percent"] = max(0, min(100, overall))
+
+    health_running = bool(health.get("running"))
+    mapping_running = bool(mapping.get("running"))
+    _progress["running"] = health_running or mapping_running
+
+    if health_running and mapping_running:
+        _progress["phase"] = "parallel"
+        _progress["message"] = "健康診断と容量マップを並行処理中…"
+    elif health_running:
+        _progress["phase"] = health.get("phase") or "health"
+        _progress["message"] = health.get("message") or "健康診断中…"
+    elif mapping_running:
+        _progress["phase"] = "space_map"
+        _progress["message"] = mapping.get("message") or "容量マップ作成中…"
+    else:
+        err = finished_error or health.get("error") or mapping.get("error")
+        if err:
+            _progress["phase"] = "error"
+            _progress["message"] = "スキャンに失敗しました"
+            _progress["error"] = err
+        else:
+            _progress["phase"] = "done"
+            _progress["message"] = "健康診断と容量マップの作成が完了しました"
+            _progress["error"] = None
+            _progress["percent"] = 100
+        _progress["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def _set_health_progress(
     *,
     running: bool | None = None,
     phase: str | None = None,
@@ -52,34 +108,89 @@ def _set_progress(
     finished: bool = False,
 ) -> None:
     with _progress_lock:
+        health = _progress["health"]
         if running is not None:
-            _progress["running"] = running
+            health["running"] = running
         if phase is not None:
-            _progress["phase"] = phase
+            health["phase"] = phase
         if percent is not None:
-            _progress["percent"] = max(0, min(100, int(percent)))
+            health["percent"] = max(0, min(100, int(percent)))
         if message is not None:
-            _progress["message"] = message
+            health["message"] = message
         if error is not None:
-            _progress["error"] = error
-        if running is True and _progress.get("started_at") is None:
-            _progress["started_at"] = datetime.now(timezone.utc).isoformat()
-            _progress["finished_at"] = None
-            _progress["error"] = None
+            health["error"] = error
         if finished:
-            _progress["running"] = False
-            _progress["finished_at"] = datetime.now(timezone.utc).isoformat()
-            _progress["percent"] = 100 if error is None else _progress.get("percent", 0)
+            health["running"] = False
+            if error is None and health.get("error") is None:
+                health["percent"] = 100
+                health["message"] = health.get("message") or "健康診断が完了しました"
+            elif error is not None:
+                health["error"] = error
+                health["message"] = "健康診断に失敗しました"
+        _recompute_overall(finished_error=error if finished else None)
+
+
+def _set_mapping_progress(
+    *,
+    running: bool | None = None,
+    percent: int | None = None,
+    message: str | None = None,
+    error: str | None = None,
+    current_drive: str | None = None,
+    finished: bool = False,
+) -> None:
+    with _progress_lock:
+        mapping = _progress["mapping"]
+        if running is not None:
+            mapping["running"] = running
+        if percent is not None:
+            mapping["percent"] = max(0, min(100, int(percent)))
+        if message is not None:
+            mapping["message"] = message
+        if error is not None:
+            mapping["error"] = error
+        if current_drive is not None:
+            mapping["current_drive"] = current_drive
+        if finished:
+            mapping["running"] = False
+            mapping["current_drive"] = None
+            if error is None and mapping.get("error") is None:
+                mapping["percent"] = 100
+                mapping["message"] = mapping.get("message") or "容量マップの作成が完了しました"
+            elif error is not None:
+                mapping["error"] = error
+                mapping["message"] = "容量マップの作成に失敗しました"
+        _recompute_overall(finished_error=error if finished else None)
+
+
+# 後方互換: 旧コードが _set_progress を呼んでも健康診断トラックに流す
+def _set_progress(
+    *,
+    running: bool | None = None,
+    phase: str | None = None,
+    percent: int | None = None,
+    message: str | None = None,
+    error: str | None = None,
+    finished: bool = False,
+) -> None:
+    _set_health_progress(
+        running=running,
+        phase=phase,
+        percent=percent,
+        message=message,
+        error=error,
+        finished=finished,
+    )
 
 
 def _collect_all_with_progress() -> dict[str, Any]:
-    _set_progress(phase="inventory", percent=8, message="PC情報（CPU / メモリ / OS など）を取得中…")
+    _set_health_progress(phase="inventory", percent=8, message="PC情報（CPU / メモリ / OS など）を取得中…")
     inventory = collect_inventory()
 
-    _set_progress(phase="disks", percent=35, message="ディスク情報・SMART を取得中…")
+    _set_health_progress(phase="disks", percent=35, message="ディスク情報・SMART を取得中…")
     disks = collect_disks()
 
-    _set_progress(phase="volumes", percent=60, message="ドライブの空き容量を確認中…")
+    _set_health_progress(phase="volumes", percent=60, message="ドライブの空き容量を確認中…")
     volumes = collect_volumes()
 
     elevated = is_elevated()
@@ -116,10 +227,11 @@ def _collect_all_with_progress() -> dict[str, Any]:
     }
 
 
-def run_scan(notify_alerts: bool = True) -> dict[str, Any]:
+def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[str, Any]:
+    """健康診断スキャン。include_maps=True のときは従来どおりマップも直列実行（互換用）。"""
     global _last_scan
     with _lock:
-        _set_progress(
+        _set_health_progress(
             running=True,
             phase="start",
             percent=2,
@@ -129,7 +241,7 @@ def run_scan(notify_alerts: bool = True) -> dict[str, Any]:
             settings = db.get_settings()
             raw = _collect_all_with_progress()
 
-            _set_progress(phase="evaluate", percent=75, message="リスク判定と提案を作成中…")
+            _set_health_progress(phase="evaluate", percent=75, message="リスク判定と提案を作成中…")
             changes = db.upsert_known_disks(raw.get("disks") or [])
             evaluated = evaluate(raw, settings)
 
@@ -167,7 +279,7 @@ def run_scan(notify_alerts: bool = True) -> dict[str, Any]:
                 "scanned_at": datetime.now(timezone.utc).isoformat(),
             }
 
-            _set_progress(phase="save", percent=90, message="結果を保存中…")
+            _set_health_progress(phase="save", percent=90, message="結果を保存中…")
             db.save_snapshot(evaluated["overall_status"], payload)
             db.save_disk_history(evaluated.get("disks") or [])
 
@@ -203,21 +315,21 @@ def run_scan(notify_alerts: bool = True) -> dict[str, Any]:
                 except Exception:
                     pass
 
-            # 容量マップもまとめて作成（固定・リムーバブルの各ドライブ）
-            try:
-                _run_space_maps_after_health()
-            except Exception as map_exc:
-                print("space map after health failed", map_exc)
+            if include_maps:
+                try:
+                    _run_space_maps()
+                except Exception as map_exc:
+                    print("space map after health failed", map_exc)
 
-            _set_progress(
+            _set_health_progress(
                 phase="done",
                 percent=100,
-                message="健康診断と容量マップの作成が完了しました",
+                message="健康診断が完了しました",
                 finished=True,
             )
             return payload
         except Exception as exc:
-            _set_progress(
+            _set_health_progress(
                 phase="error",
                 message="スキャンに失敗しました",
                 error=str(exc),
@@ -226,48 +338,92 @@ def run_scan(notify_alerts: bool = True) -> dict[str, Any]:
             raise
 
 
-def _run_space_maps_after_health() -> None:
+def _run_space_maps() -> None:
     from app.space_scan import list_drives, run_scan_blocking
 
-    drives = list_drives()
-    if not drives:
-        return
-    total = len(drives)
-    for index, drive in enumerate(drives):
-        letter = drive.get("letter") or "?"
-        root = drive.get("rootPath") or f"{letter}:\\"
-        base = 78
-        span = 20
-        percent = base + int((index / max(total, 1)) * span)
-        _set_progress(
-            phase="space_map",
-            percent=percent,
-            message=f"{letter}: のマッピングを作成中…（{index + 1}/{total}）",
+    _set_mapping_progress(
+        running=True,
+        percent=2,
+        message="容量マップの対象ドライブを確認中…",
+        current_drive="",
+    )
+    try:
+        drives = list_drives()
+        if not drives:
+            _set_mapping_progress(
+                percent=100,
+                message="マッピング対象のドライブがありません",
+                finished=True,
+            )
+            return
+        total = len(drives)
+        for index, drive in enumerate(drives):
+            letter = drive.get("letter") or "?"
+            root = drive.get("rootPath") or f"{letter}:\\"
+            percent = 5 + int((index / max(total, 1)) * 90)
+            _set_mapping_progress(
+                percent=percent,
+                message=f"{letter}: のマッピングを作成中…（{index + 1}/{total}）",
+                current_drive=f"{letter}:",
+            )
+            run_scan_blocking(root)
+        _set_mapping_progress(
+            percent=100,
+            message="容量マップの作成が完了しました",
+            finished=True,
         )
-        run_scan_blocking(root)
+    except Exception as exc:
+        _set_mapping_progress(
+            message="容量マップの作成に失敗しました",
+            error=str(exc),
+            finished=True,
+        )
+        raise
 
 
 def start_scan(notify_alerts: bool = True) -> dict[str, Any]:
-    """バックグラウンドで健康診断スキャンを開始する。"""
-    global _scan_thread
+    """健康診断と容量マップを並行でバックグラウンド開始する。"""
+    global _scan_thread, _map_thread
     with _progress_lock:
         if _progress.get("running"):
             return {"ok": True, "started": False, "message": "already running"}
+        now = datetime.now(timezone.utc).isoformat()
         _progress["running"] = True
         _progress["phase"] = "queued"
         _progress["percent"] = 1
-        _progress["message"] = "スキャンを準備中…"
+        _progress["message"] = "健康診断と容量マップを準備中…"
         _progress["error"] = None
-        _progress["started_at"] = datetime.now(timezone.utc).isoformat()
+        _progress["started_at"] = now
         _progress["finished_at"] = None
+        _progress["health"] = {
+            "running": True,
+            "percent": 1,
+            "message": "健康診断を準備中…",
+            "error": None,
+            "phase": "queued",
+        }
+        _progress["mapping"] = {
+            "running": True,
+            "percent": 1,
+            "message": "容量マップを準備中…",
+            "error": None,
+            "current_drive": None,
+        }
 
-    def _worker() -> None:
+    def _health_worker() -> None:
         try:
-            run_scan(notify_alerts=notify_alerts)
+            run_scan(notify_alerts=notify_alerts, include_maps=False)
         except Exception:
-            # progress already marked error in run_scan
             pass
 
-    _scan_thread = threading.Thread(target=_worker, name="pchc-health-scan", daemon=True)
+    def _map_worker() -> None:
+        try:
+            _run_space_maps()
+        except Exception:
+            pass
+
+    _scan_thread = threading.Thread(target=_health_worker, name="pchc-health-scan", daemon=True)
+    _map_thread = threading.Thread(target=_map_worker, name="pchc-space-maps", daemon=True)
     _scan_thread.start()
-    return {"ok": True, "started": True}
+    _map_thread.start()
+    return {"ok": True, "started": True, "parallel": True}

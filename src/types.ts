@@ -42,25 +42,76 @@ export interface VolumeInfo {
   physical_disk_ids?: string[]
 }
 
+export interface SmartAttributeRow {
+  id?: string | number
+  name?: string
+  label_ja?: string
+  current?: number | null
+  worst?: number | null
+  threshold?: number | null
+  raw?: string | number | null
+  status?: string
+  when_failed?: string
+  flags?: string | null
+}
+
+export interface DiskSmartInfo {
+  overall?: string
+  health_meter?: string
+  temperature_c?: number
+  power_on_hours?: number
+  power_on_days?: number
+  power_on_years?: number
+  power_cycles?: number
+  source?: string
+  note?: string
+  needs_elevation?: boolean
+  firmware?: string
+  serial?: string
+  interface?: string
+  transfer_mode?: string
+  ata_standard?: string
+  sata_version?: string
+  features?: string[]
+  features_text?: string
+  buffer_size_kb?: number | null
+  nv_cache_size?: string | null
+  rotation_rate?: number | null
+  rotation_label?: string
+  form_factor?: string
+  attributes?: Record<string, number | string>
+  attribute_table?: SmartAttributeRow[]
+}
+
 export interface DiskInfo {
   device_id?: string
   model?: string
   serial?: string
   media_type?: string
+  bus_type?: string
   size_gb?: number
   health_status?: string
+  operational_status?: string
+  firmware?: string
   free_pct?: number
   free_gb?: number
   risk_level?: string
   reasons?: string[]
   needs_replacement?: boolean
   volumes?: VolumeInfo[]
-  smart?: {
-    overall?: string
-    temperature_c?: number
-    power_on_hours?: number
-    attributes?: Record<string, number>
-  }
+  interface?: string
+  interface_type?: string
+  transfer_mode?: string
+  ata_standard?: string
+  sata_version?: string
+  features?: string[]
+  features_text?: string
+  buffer_size_kb?: number | null
+  nv_cache_size?: string | null
+  rotation_rate?: number | null
+  rotation_label?: string
+  form_factor?: string
+  smart?: DiskSmartInfo
 }
 
 export interface InventoryInfo {
@@ -82,6 +133,15 @@ export interface InventoryInfo {
   [key: string]: unknown
 }
 
+export interface ScanTrackProgress {
+  running?: boolean
+  percent?: number
+  message?: string
+  error?: string | null
+  phase?: string
+  current_drive?: string | null
+}
+
 export interface ScanProgressInfo {
   running: boolean
   phase?: string
@@ -90,6 +150,8 @@ export interface ScanProgressInfo {
   error?: string | null
   started_at?: string | null
   finished_at?: string | null
+  health?: ScanTrackProgress
+  mapping?: ScanTrackProgress
 }
 
 export interface VolumeIssue {
