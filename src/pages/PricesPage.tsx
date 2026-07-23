@@ -322,7 +322,7 @@ export function PricesPage({ showToast }: Props) {
           </div>
         )}
 
-        <div className="stack" style={{ marginTop: 12, maxHeight: 520, overflow: 'auto' }}>
+        <div className="catalog-scroll">
           {catalogGroups.map((group) => {
             const categoryOpen = Boolean(openCategories[group.category])
             const brands =
@@ -377,19 +377,15 @@ export function PricesPage({ showToast }: Props) {
                             </span>
                           </button>
                           {brandOpen && (
-                            <div className="stack" style={{ marginTop: 6 }}>
+                            <div className="catalog-item-grid">
                               {items.map((item) => (
-                                <label
-                                  className="list-row"
-                                  key={item.id}
-                                  style={{ cursor: 'pointer' }}
-                                >
-                                  <div>
+                                <label className="catalog-item" key={item.id}>
+                                  <div className="catalog-item-text">
                                     <strong>{item.name}</strong>
-                                    <p className="muted" style={{ margin: '4px 0 0' }}>
+                                    <span className="muted">
                                       {item.generation}
                                       {item.brand === 'AMD' ? ` · ${amdPlatform(item)}` : ''}
-                                    </p>
+                                    </span>
                                   </div>
                                   <input
                                     type="checkbox"

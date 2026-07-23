@@ -251,7 +251,6 @@
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.55);
   box-shadow: inset 0 0 0 1px var(--line);
-  overflow: hidden;
 }
 
 .catalog-fold-head,
@@ -287,6 +286,75 @@
 
 .catalog-brand-head {
   padding: 10px 12px;
+}
+
+.catalog-scroll {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* ページ全体のスクロールを使う（内側の詰まったスクロールだとホイールが効きにくい） */
+}
+
+.catalog-item-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.catalog-item {
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 64px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: inset 0 0 0 1px var(--line);
+  cursor: pointer;
+}
+
+.catalog-item:hover {
+  background: #fff;
+}
+
+.catalog-item-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.catalog-item-text strong {
+  font-size: 13px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.catalog-item-text .muted {
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.catalog-item input[type='checkbox'] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+@media (min-width: 1200px) {
+  .catalog-item-grid {
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .catalog-item-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .page-area {
