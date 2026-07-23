@@ -89,7 +89,7 @@ export default function App() {
       return
     }
     setElevating(true)
-    showToast('管理者権限の確認画面を開いています…')
+    showToast('画面を準備してから、管理者で開き直します…')
     try {
       const ok = await api.elevate()
       if (ok) {
@@ -144,7 +144,7 @@ export default function App() {
                 disabled={elevating}
               >
                 {elevating && <span className="btn-spinner" aria-hidden />}
-                {elevating ? '確認画面を待機中…' : '管理者として再起動'}
+                {elevating ? '準備中…' : '管理者として再起動'}
               </button>
             )}
             <button

@@ -9,11 +9,14 @@ import {
   Notification,
   dialog,
 } from 'electron'
-import { spawn, execSync, type ChildProcess } from 'node:child_process'
+import { spawn, execSync, execFile, type ChildProcess } from 'node:child_process'
+import { promisify } from 'node:util'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+
+const execFileAsync = promisify(execFile)
 
 const HOST = '127.0.0.1'
 const PORT = 8787
@@ -464,7 +467,19 @@ async function elevateAndQuit(): Promise<boolean> {
   if (isAdmin()) return true
 
   stopBackend()
-  const viteUrl = getViteDevServerUrl()
+  const viteUrl = normalizeDevUrl(getViteDevServerUrl() || 'http://127.0.0.1:5173/')
+  persistViteDevServerUrl(viteUrl)
+
+  // 管理者プロセスは開発サーバーに繋がらないことがあるため、先に UI を dist へ書き出す
+  if (!app.isPackaged) {
+    const built = await buildRendererForElevation()
+    if (!built) {
+      console.error('elevation aborted: renderer dist missing')
+      startBackend()
+      return false
+    }
+  }
+
   writeElevateMarker(process.pid, viteUrl)
   // 先にロックを外す（昇格プロセスが 2 つ目扱いで即終了するのを防ぐ）
   app.releaseSingleInstanceLock()
@@ -535,10 +550,51 @@ function probeHttpUrl(url: string, timeoutMs = 1000): Promise<boolean> {
   })
 }
 
+async function buildRendererForElevation(): Promise<boolean> {
+  const distIndex = path.join(ROOT, 'dist', 'index.html')
+  try {
+    const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx'
+    await execFileAsync(
+      npx,
+      ['vite', 'build', '--config', 'vite.renderer.config.ts'],
+      {
+        cwd: ROOT,
+        windowsHide: true,
+        timeout: 180000,
+        env: { ...process.env },
+      },
+    )
+    return fs.existsSync(distIndex)
+  } catch (error) {
+    console.error('renderer build for elevation failed', error)
+    return fs.existsSync(distIndex)
+  }
+}
+
+function normalizeDevUrl(url: string): string {
+  return url.replace('://localhost', '://127.0.0.1')
+}
+
 async function loadRenderer(win: BrowserWindow) {
+  const distIndex = path.join(ROOT, 'dist', 'index.html')
+
+  // Windows では管理者プロセスから非管理者の Vite に繋がらないことがある。
+  // その場合はビルド済み UI（dist）をファイルとして開く。
+  if (isAdmin() && !app.isPackaged && fs.existsSync(distIndex)) {
+    try {
+      await win.loadFile(distIndex)
+      return
+    } catch (error) {
+      console.error('failed to load dist as admin', error)
+    }
+  }
+
   const candidates: string[] = []
   const known = getViteDevServerUrl()
-  if (known) candidates.push(known)
+  if (known) {
+    candidates.push(normalizeDevUrl(known))
+    if (!candidates.includes(known)) candidates.push(known)
+  }
   if (!app.isPackaged) {
     for (const port of [5173, 5174, 5175, 5176]) {
       const url = `http://127.0.0.1:${port}/`
@@ -557,7 +613,6 @@ async function loadRenderer(win: BrowserWindow) {
     }
   }
 
-  const distIndex = path.join(__dirname, '../dist/index.html')
   if (fs.existsSync(distIndex)) {
     try {
       await win.loadFile(distIndex)
