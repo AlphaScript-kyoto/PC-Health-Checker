@@ -47,6 +47,20 @@ function elevateReadyPath(): string {
 /** dist-electron の親 = プロジェクトルート */
 const ROOT = path.join(__dirname, '..')
 
+// 通常起動と管理者起動で userData / シングルインスタンスロックがズレないように固定
+{
+  const userData = path.join(
+    process.env.LOCALAPPDATA || os.homedir(),
+    'PCHealthChecker',
+  )
+  try {
+    fs.mkdirSync(userData, { recursive: true })
+  } catch {
+    // ignore
+  }
+  app.setPath('userData', userData)
+}
+
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let pyProc: ChildProcess | null = null
@@ -273,17 +287,17 @@ function killProcessTree(pid: number) {
 }
 
 /**
- * 管理者で起動した瞬間に、昇格前プロセスを強制終了する。
+ * 管理者で起動し、シングルインスタンスロック取得後に呼ぶ。
+ * ready を書いて旧プロセスを終了する（旧側は ready までウィンドウを維持する）。
  */
 function takeoverFromNonElevatedPredecessor() {
   if (!isAdmin()) return
   const marker = readElevateMarker()
   if (!marker) return
 
-  // 先に ready を書き、殺し損ねても旧側が自分で終了できるようにする
+  // ロック取得後にだけ ready を書く（早すぎる ready だと旧が先に落ちて昇格側が起動失敗する）
   markElevateReady()
   killProcessTree(marker.oldPid)
-  killOtherAppElectronProcesses()
 
   try {
     fs.unlinkSync(elevateMarkerPath())
@@ -292,46 +306,17 @@ function takeoverFromNonElevatedPredecessor() {
   }
 }
 
-/** 同じアプリの他 Electron を落とす（二重起動の掃除） */
-function killOtherAppElectronProcesses() {
-  if (process.platform !== 'win32') return
-  const self = process.pid
-  const ps = `
-$ErrorActionPreference = 'SilentlyContinue'
-Get-CimInstance Win32_Process | Where-Object {
-  $_.ProcessId -ne ${self} -and
-  (
-    ($_.Name -match 'electron|PCHealth|pc-health' -and $_.CommandLine -match 'pc-health-checker') -or
-    ($_.CommandLine -match 'pc-health-checker' -and $_.CommandLine -match 'electron')
-  )
-} | ForEach-Object {
-  Stop-Process -Id $_.ProcessId -Force
-}
-`
-  try {
-    execSync(`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ${JSON.stringify(ps)}`, {
-      stdio: 'ignore',
-      windowsHide: true,
-    })
-  } catch {
-    // ignore
-  }
-}
-
 /**
- * UAC → 昇格ワーカー起動。
- * ワーカーは Electron を起動した直後に ready を書いて終了する。
- * Node 側は「ワーカー終了」と「ready ファイル」の早い方で先へ進む（宙吊り対策）。
+ * Electron 自体を UAC 付きで起動する。
+ * キャンセルすると exit 1。許可するとプロセス生成直後に exit 0（アプリ終了は待たない）。
  */
-function spawnElevatedWithUac(): {
+function spawnElevatedElectron(): {
   waitExit: Promise<number>
-  workerPath: string
-  launcherPath: string
+  scriptPath: string
 } {
   const exe = process.execPath
   const workDir = ROOT
   const viteUrl = getViteDevServerUrl() ?? ''
-  const readyFile = elevateReadyPath()
 
   const baseArgs = process.argv
     .slice(1)
@@ -342,60 +327,40 @@ function spawnElevatedWithUac(): {
     electronArgs.push(`${VITE_ARG_PREFIX}${viteUrl}`)
   }
 
-  const argListPs = electronArgs.map(quoteForPsSingle).join(', ')
   const stamp = `${process.pid}-${Date.now()}`
-  const workerPath = path.join(elevateStateDir(), `elevated-worker-${stamp}.ps1`)
-  const launcherPath = path.join(elevateStateDir(), `elevate-launch-${stamp}.ps1`)
+  const scriptPath = path.join(elevateStateDir(), `elevate-runas-${stamp}.ps1`)
+  const argListPs = electronArgs.map(quoteForPsSingle).join(', ')
 
-  const elevatedWorker = `
-$ErrorActionPreference = 'Stop'
-$workDir = ${quoteForPsSingle(workDir)}
-Set-Location -LiteralPath $workDir
-${viteUrl ? `$env:VITE_DEV_SERVER_URL = ${quoteForPsSingle(viteUrl)}` : ''}
-$exe = ${quoteForPsSingle(exe)}
-$argList = @(${argListPs})
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = $exe
-$psi.WorkingDirectory = $workDir
-$psi.UseShellExecute = $true
-if ($argList.Count -gt 0) {
-  $psi.Arguments = ($argList | ForEach-Object {
-    if ($_ -match '[\\s"]') { '"' + ($_ -replace '"','""') + '"' } else { $_ }
-  }) -join ' '
-}
-[void][System.Diagnostics.Process]::Start($psi)
-# 通常/管理者で Temp が違っても読める場所へ ready を書く
-$readyMs = [string][int64]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalMilliseconds
-Set-Content -LiteralPath ${quoteForPsSingle(readyFile)} -Value $readyMs -Encoding ASCII
-Remove-Item -LiteralPath ${quoteForPsSingle(workerPath)} -Force -ErrorAction SilentlyContinue
-[Environment]::Exit(0)
-`.trim()
-
-  const launcher = `
+  const script = `
 $ErrorActionPreference = 'Stop'
 try {
-  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',${quoteForPsSingle(workerPath)})
-  if ($null -eq $p) { exit 1 }
-  exit $(if ($null -eq $p.ExitCode) { 0 } else { $p.ExitCode })
+  $exe = ${quoteForPsSingle(exe)}
+  $workDir = ${quoteForPsSingle(workDir)}
+  $argList = @(${argListPs})
+  if ($argList.Count -gt 0) {
+    Start-Process -FilePath $exe -WorkingDirectory $workDir -Verb RunAs -ArgumentList $argList
+  } else {
+    Start-Process -FilePath $exe -WorkingDirectory $workDir -Verb RunAs
+  }
+  exit 0
 } catch {
   exit 1
 }
 `.trim()
 
-  fs.writeFileSync(workerPath, elevatedWorker, 'utf8')
-  fs.writeFileSync(launcherPath, launcher, 'utf8')
+  fs.writeFileSync(scriptPath, script, 'utf8')
 
   const waitExit = new Promise<number>((resolve) => {
     const child = spawn(
       'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', launcherPath],
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
       { windowsHide: true, stdio: 'ignore' },
     )
     child.on('error', () => resolve(1))
     child.on('exit', (code) => resolve(code ?? 1))
   })
 
-  return { waitExit, workerPath, launcherPath }
+  return { waitExit, scriptPath }
 }
 
 function sleep(ms: number) {
@@ -413,6 +378,7 @@ async function waitForElevateReady(timeoutMs: number): Promise<boolean> {
 
 /**
  * 管理者として立ち上げ直す。
+ * 旧ウィンドウは、管理者プロセスがロック取得＆ ready を書くまで閉じない。
  */
 async function elevateAndQuit(): Promise<boolean> {
   if (process.platform !== 'win32') return false
@@ -420,34 +386,33 @@ async function elevateAndQuit(): Promise<boolean> {
 
   stopBackend()
   writeElevateMarker(process.pid)
+  // 先にロックを外す（昇格プロセスが 2 つ目扱いで即終了するのを防ぐ）
   app.releaseSingleInstanceLock()
 
-  let workerPath = ''
-  let launcherPath = ''
+  let scriptPath = ''
   try {
-    const spawned = spawnElevatedWithUac()
-    workerPath = spawned.workerPath
-    launcherPath = spawned.launcherPath
+    const spawned = spawnElevatedElectron()
+    scriptPath = spawned.scriptPath
+    const code = await spawned.waitExit
 
-    // UAC キャンセルは waitExit、成功は ready（ワーカーが書く）か waitExit の早い方
-    const outcome = await Promise.race([
-      spawned.waitExit.then((code) => ({ kind: 'exit' as const, code })),
-      waitForElevateReady(180000).then((ok) => ({ kind: 'ready' as const, ok })),
-    ])
+    if (code !== 0) {
+      // UAC キャンセルなど
+      clearElevateMarker()
+      app.requestSingleInstanceLock()
+      startBackend()
+      return false
+    }
 
-    // ready があれば成功。exit 0 も成功。exit 非0 でも直前に ready が書かれていれば成功。
-    const success =
-      isElevateReady() ||
-      (outcome.kind === 'ready' && outcome.ok) ||
-      (outcome.kind === 'exit' && outcome.code === 0)
-
-    if (success) {
+    // 管理者 Electron が本起動して ready を書くまで待つ（ここで初めて旧を閉じてよい）
+    const ready = await waitForElevateReady(90000)
+    if (ready) {
       try {
         mainWindow?.hide()
       } catch {
         // ignore
       }
-      setTimeout(() => forceQuitApp(), 80)
+      // 昇格側の taskkill と二重でもよいので、残っていれば自分でも終了
+      setTimeout(() => forceQuitApp(), 100)
       return true
     }
 
@@ -462,10 +427,9 @@ async function elevateAndQuit(): Promise<boolean> {
     startBackend()
     return false
   } finally {
-    for (const p of [workerPath, launcherPath]) {
-      if (!p) continue
+    if (scriptPath) {
       try {
-        fs.unlinkSync(p)
+        fs.unlinkSync(scriptPath)
       } catch {
         // ignore
       }

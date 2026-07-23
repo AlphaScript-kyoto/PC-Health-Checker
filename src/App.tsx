@@ -95,7 +95,7 @@ export default function App() {
       if (ok) {
         showToast('管理者として開き直します…')
       } else {
-        showToast('管理者権限は許可されませんでした')
+        showToast('管理者での再起動をキャンセルしたか、起動に失敗しました')
       }
     } catch {
       showToast('管理者昇格に失敗しました')
