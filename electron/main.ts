@@ -119,6 +119,27 @@ function stopBackend() {
   pyProc = null
 }
 
+/** トレイ常駐でも確実に終了する */
+function forceQuitApp() {
+  quitting = true
+  stopBackend()
+  try {
+    tray?.destroy()
+  } catch {
+    // ignore
+  }
+  tray = null
+  for (const win of BrowserWindow.getAllWindows()) {
+    try {
+      win.removeAllListeners('close')
+      win.destroy()
+    } catch {
+      // ignore
+    }
+  }
+  app.exit(0)
+}
+
 function waitForServer(timeoutMs = 45000): Promise<void> {
   const start = Date.now()
   return new Promise((resolve, reject) => {
@@ -312,9 +333,8 @@ function createTray() {
           app.releaseSingleInstanceLock()
           const ok = await relaunchElevated()
           if (ok) {
-            quitting = true
-            stopBackend()
-            app.quit()
+            // IPC と同様、少し待ってから強制終了（古い窓を残さない）
+            setTimeout(() => forceQuitApp(), 400)
           } else {
             app.requestSingleInstanceLock()
           }
@@ -325,8 +345,7 @@ function createTray() {
     {
       label: '終了',
       click: () => {
-        quitting = true
-        app.quit()
+        forceQuitApp()
       },
     },
   ])
@@ -340,6 +359,8 @@ function createTray() {
 }
 
 function registerIpc() {
+  ipcMain.handle('desktop:is-admin', async () => isAdmin())
+
   ipcMain.handle('desktop:elevate', async () => {
     if (isAdmin()) return true
 
@@ -348,9 +369,8 @@ function registerIpc() {
 
     const ok = await relaunchElevated()
     if (ok) {
-      quitting = true
-      stopBackend()
-      app.quit()
+      // 先に true を返してから強制終了（古いウィンドウを残さない）
+      setTimeout(() => forceQuitApp(), 400)
       return true
     }
 
@@ -428,6 +448,12 @@ if (!gotLock) {
   app.on('before-quit', () => {
     quitting = true
     stopBackend()
+    try {
+      tray?.destroy()
+    } catch {
+      // ignore
+    }
+    tray = null
   })
 
   // トレイ常駐のため、ウィンドウを全部閉じても app.quit() しない

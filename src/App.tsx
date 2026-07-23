@@ -50,9 +50,19 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    void getAbout()
-      .then((about) => setElevated(Boolean(about.elevated)))
-      .catch(() => setElevated(true))
+    const refreshAdmin = () => {
+      void window.desktopApi?.isAdmin()
+        .then((admin) => setElevated(Boolean(admin)))
+        .catch(() => {
+          // Electron 外では about API にフォールバック
+          void getAbout()
+            .then((about) => setElevated(Boolean(about.elevated)))
+            .catch(() => setElevated(true))
+        })
+    }
+    refreshAdmin()
+    window.addEventListener('focus', refreshAdmin)
+    return () => window.removeEventListener('focus', refreshAdmin)
   }, [refreshKey])
 
   const runScan = async () => {
@@ -122,7 +132,11 @@ export default function App() {
             <p>ローカルだけで動く、PCの健康診断</p>
           </div>
           <div className="top-bar-actions">
-            {!elevated && (
+            {elevated ? (
+              <span className="admin-pill" title="管理者権限で動作中です">
+                管理者で動作中
+              </span>
+            ) : (
               <button
                 type="button"
                 className={`btn ghost ${elevating ? 'is-busy' : ''}`}
@@ -130,7 +144,7 @@ export default function App() {
                 disabled={elevating}
               >
                 {elevating && <span className="btn-spinner" aria-hidden />}
-                管理者として再起動
+                {elevating ? '確認画面を待機中…' : '管理者として再起動'}
               </button>
             )}
             <button
