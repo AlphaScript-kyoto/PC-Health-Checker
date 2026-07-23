@@ -9,14 +9,11 @@ import {
   Notification,
   dialog,
 } from 'electron'
-import { spawn, execSync, execFile, type ChildProcess } from 'node:child_process'
-import { promisify } from 'node:util'
+import { spawn, execSync, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-
-const execFileAsync = promisify(execFile)
 
 const HOST = '127.0.0.1'
 const PORT = 8787
@@ -111,10 +108,20 @@ function startBackend() {
 
 function stopBackend() {
   if (!pyProc) return
+  const pid = pyProc.pid
   try {
-    pyProc.kill()
+    if (process.platform === 'win32' && pid) {
+      // 子プロセスごと落として 8787 を解放する
+      execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'ignore' })
+    } else {
+      pyProc.kill()
+    }
   } catch {
-    // ignore
+    try {
+      pyProc.kill()
+    } catch {
+      // ignore
+    }
   }
   pyProc = null
 }
@@ -137,6 +144,7 @@ function forceQuitApp() {
       // ignore
     }
   }
+  // quit() だとトレイ常駐で残ることがあるため exit で落とす
   app.exit(0)
 }
 
@@ -184,7 +192,11 @@ function isAdmin(): boolean {
 /**
  * UAC で管理者として同じアプリを起動する。
  * Start-Process -Verb RunAs だと環境変数が消えるため、
- * 「昇格した PowerShell の中」で VITE URL をセットしてから Electron を起動する。
+ * 昇格した PowerShell 内で VITE URL をセットしてから Electron を起動する。
+ *
+ * 重要: Electron は Process.Start(UseShellExecute) で完全に切り離す。
+ * PowerShell の Start-Process -Wait が子の Electron まで待ち続け、
+ * 旧ウィンドウが「確認画面を待機中」のまま残るのを防ぐ。
  */
 async function relaunchElevated(): Promise<boolean> {
   if (process.platform !== 'win32') return false
@@ -194,7 +206,6 @@ async function relaunchElevated(): Promise<boolean> {
   const workDir = ROOT
   const viteUrl = getViteDevServerUrl() ?? ''
 
-  // vite-plugin-electron 開発時: ['.', '--no-elevate'] など
   const baseArgs = process.argv
     .slice(1)
     .filter((a) => a !== '--no-elevate' && !a.startsWith(VITE_ARG_PREFIX))
@@ -205,6 +216,10 @@ async function relaunchElevated(): Promise<boolean> {
   }
 
   const argListPs = electronArgs.map(quoteForPsSingle).join(', ')
+  const stamp = `${process.pid}-${Date.now()}`
+  const workerPath = path.join(os.tmpdir(), `pchc-elevated-${stamp}.ps1`)
+  const launcherPath = path.join(os.tmpdir(), `pchc-elevate-launch-${stamp}.ps1`)
+
   const elevatedWorker = `
 $ErrorActionPreference = 'Stop'
 $workDir = ${quoteForPsSingle(workDir)}
@@ -212,36 +227,53 @@ Set-Location -LiteralPath $workDir
 ${viteUrl ? `$env:VITE_DEV_SERVER_URL = ${quoteForPsSingle(viteUrl)}` : ''}
 $exe = ${quoteForPsSingle(exe)}
 $argList = @(${argListPs})
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $exe
+$psi.WorkingDirectory = $workDir
+$psi.UseShellExecute = $true
 if ($argList.Count -gt 0) {
-  Start-Process -FilePath $exe -ArgumentList $argList -WorkingDirectory $workDir
-} else {
-  Start-Process -FilePath $exe -WorkingDirectory $workDir
+  $psi.Arguments = ($argList | ForEach-Object {
+    if ($_ -match '[\\s"]') { '"' + ($_ -replace '"','""') + '"' } else { $_ }
+  }) -join ' '
 }
+[void][System.Diagnostics.Process]::Start($psi)
+[Environment]::Exit(0)
 `.trim()
 
-  const workerPath = path.join(
-    os.tmpdir(),
-    `pchc-elevated-${process.pid}-${Date.now()}.ps1`,
-  )
-  const launcherPath = path.join(
-    os.tmpdir(),
-    `pchc-elevate-launch-${process.pid}-${Date.now()}.ps1`,
-  )
   const launcher = `
 $ErrorActionPreference = 'Stop'
 $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',${quoteForPsSingle(workerPath)})
 if ($null -eq $p) { exit 1 }
-exit $p.ExitCode
+exit $(if ($null -eq $p.ExitCode) { 0 } else { $p.ExitCode })
 `.trim()
 
   try {
     fs.writeFileSync(workerPath, elevatedWorker, 'utf8')
     fs.writeFileSync(launcherPath, launcher, 'utf8')
-    await execFileAsync(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', launcherPath],
-      { windowsHide: true },
-    )
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        'powershell.exe',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', launcherPath],
+        { windowsHide: true, stdio: 'ignore' },
+      )
+      const timer = setTimeout(() => {
+        try {
+          child.kill()
+        } catch {
+          // ignore
+        }
+        reject(new Error('elevation timed out'))
+      }, 180000)
+      child.on('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
+      child.on('exit', (code) => {
+        clearTimeout(timer)
+        if (code === 0) resolve()
+        else reject(new Error(`elevation exited with code ${code}`))
+      })
+    })
     return true
   } catch (error) {
     console.error('elevation failed', error)
@@ -255,6 +287,33 @@ exit $p.ExitCode
       }
     }
   }
+}
+
+/** 管理者として立ち上げ直す（成功後に旧ウィンドウを必ず閉じる） */
+async function elevateAndQuit(): Promise<boolean> {
+  if (isAdmin()) return true
+
+  // 先にバックエンドを落とし、昇格側が 8787 を使えるようにする
+  stopBackend()
+  // ロックを外さないと、昇格プロセスが「2つ目」扱いですぐ終了する
+  app.releaseSingleInstanceLock()
+
+  const ok = await relaunchElevated()
+  if (!ok) {
+    app.requestSingleInstanceLock()
+    // 開発中はバックエンドを戻す
+    startBackend()
+    return false
+  }
+
+  // 昇格プロセス起動済み → 旧プロセスは即終了（Vite が再起動しても single-instance で落ちる）
+  try {
+    mainWindow?.hide()
+  } catch {
+    // ignore
+  }
+  setTimeout(() => forceQuitApp(), 300)
+  return true
 }
 
 function createWindow() {
@@ -330,13 +389,15 @@ function createTray() {
       click: () => {
         void (async () => {
           if (isAdmin()) return
-          app.releaseSingleInstanceLock()
-          const ok = await relaunchElevated()
-          if (ok) {
-            // IPC と同様、少し待ってから強制終了（古い窓を残さない）
-            setTimeout(() => forceQuitApp(), 400)
-          } else {
-            app.requestSingleInstanceLock()
+          const ok = await elevateAndQuit()
+          if (!ok) {
+            await dialog.showMessageBox({
+              type: 'warning',
+              title: APP_TITLE,
+              message: '管理者権限は許可されませんでした。',
+              detail:
+                'もう一度「管理者として再起動」を押すか、このまま非管理者で利用できます。',
+            })
           }
         })()
       },
@@ -364,21 +425,13 @@ function registerIpc() {
   ipcMain.handle('desktop:elevate', async () => {
     if (isAdmin()) return true
 
-    // 先にロックを外さないと、昇格プロセスが「2つ目」扱いですぐ終了する
-    app.releaseSingleInstanceLock()
+    const ok = await elevateAndQuit()
+    if (ok) return true
 
-    const ok = await relaunchElevated()
-    if (ok) {
-      // 先に true を返してから強制終了（古いウィンドウを残さない）
-      setTimeout(() => forceQuitApp(), 400)
-      return true
-    }
-
-    app.requestSingleInstanceLock()
     await dialog.showMessageBox({
       type: 'warning',
       title: APP_TITLE,
-      message: '管理者権限が許可されませんでした。',
+      message: '管理者権限は許可されませんでした。',
       detail:
         'もう一度「管理者として再起動」を押すか、このまま非管理者で利用できます（SMART が不完全なことがあります）。',
     })
@@ -406,7 +459,8 @@ function registerIpc() {
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
-  app.quit()
+  // トレイ常駐の quit() だと残ることがあるため exit
+  app.exit(0)
 } else {
   app.on('second-instance', () => {
     if (mainWindow) {

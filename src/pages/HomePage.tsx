@@ -7,13 +7,20 @@ interface Props {
   onOpenSpace: (letter?: string | null) => void
   onOpenRecommendations: () => void
   showToast: (message: string) => void
+  /** Electron プロセス側の管理者判定（バックエンドより優先） */
+  processElevated?: boolean
 }
 
 function statusClass(status: string): string {
   return status.toLowerCase().replace(/\s+/g, '')
 }
 
-export function HomePage({ onOpenSpace, onOpenRecommendations, showToast }: Props) {
+export function HomePage({
+  onOpenSpace,
+  onOpenRecommendations,
+  showToast,
+  processElevated,
+}: Props) {
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [about, setAbout] = useState<AboutInfo | null>(null)
   const [alerts, setAlerts] = useState<AlertItem[]>([])
@@ -81,7 +88,9 @@ export function HomePage({ onOpenSpace, onOpenRecommendations, showToast }: Prop
             {about && (
               <p className="muted" style={{ margin: 0 }}>
                 {about.name} v{about.version}
-                {about.elevated ? ' / 管理者権限あり' : ' / 管理者権限なし'}
+                {(processElevated ?? about.elevated)
+                  ? ' / 管理者権限あり'
+                  : ' / 管理者権限なし'}
                 {about.smartctl_available ? ' / smartctl 利用可' : ''}
               </p>
             )}

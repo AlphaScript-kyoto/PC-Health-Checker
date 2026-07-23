@@ -93,7 +93,7 @@ export default function App() {
     try {
       const ok = await api.elevate()
       if (ok) {
-        showToast('管理者として再起動します')
+        showToast('管理者として開き直します…')
       } else {
         showToast('管理者権限は許可されませんでした')
       }
@@ -165,6 +165,7 @@ export default function App() {
               onOpenSpace={goSpace}
               onOpenRecommendations={goRecommendations}
               showToast={showToast}
+              processElevated={elevated}
             />
           )}
           {tab === 'disks' && <DisksPage onOpenSpace={goSpace} showToast={showToast} />}
