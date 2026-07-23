@@ -58,7 +58,7 @@ npm start
 | ディスク | CrystalDiskInfo 相当の識別情報（温度・転送モード・対応機能・使用時間など）と SMART 属性テーブル |
 | 容量マップ | ツリーマップ・安全性ラベル・削除候補 |
 | 提案 | 交換候補リンク（価格.com は SJIS エンコード） |
-| 価格 | 追跡・カタログ（折りたたみ / CPU 世代・AM4/AM5 フィルタ / 横幅に応じて複数列）。AMD マザボに **X870 / X870E** あり（マザーボード → AMD） |
+| 価格 | 追跡・カタログ（複数列）。追跡カードに **自前の価格推移グラフ** と **Keepa 1年グラフ**（ASIN取得後）。AMD マザボに X870 / X870E あり |
 | ニュース | タブを開くたびに最新取得 |
 | 設定 | 通知・スタートアップ・閾値・スキャン時刻 |
 
@@ -82,7 +82,8 @@ npm start
 | `electron/main.ts` | ウィンドウ・トレイ・管理者昇格・Python 起動 |
 | `electron/preload.ts` | 画面向け安全 API |
 | `src/` | React UI（全タブ） |
-| `src/pages/DisksPage.tsx` | ディスク詳細・SMART テーブル表示 |
+| `src/pages/PricesPage.tsx` | 価格追跡・カタログ UI |
+| `src/components/PriceCharts.tsx` | 価格推移グラフ / Keepa 埋め込み |
 | `assets/icon.png` / `build/icon.ico` | アプリアイコン（ウィンドウ・トレイ・配布用） |
 | `scripts/make_app_icon.py` | アイコン画像から PNG / ICO を再生成 |
 | `backend/app/` | FastAPI・スキャン・DB・価格・ニュース |

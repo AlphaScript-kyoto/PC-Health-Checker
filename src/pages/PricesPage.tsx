@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { getPrices, postOrphans, postPriceRefresh, putTracked } from '../api'
+import { DualPriceChart, KeepaGraphFold } from '../components/PriceCharts'
 import { formatYen } from '../lib/format'
 import type { PriceCatalogGroup, PricePart, PricesPayload } from '../types'
 
@@ -300,10 +301,26 @@ export function PricesPage({ showToast }: Props) {
                 <div className="tracked-item-text">
                   <strong>{item.name}</strong>
                   <span className="muted">
-                    価格.com {formatYen(item.latest_kakaku?.price_yen)}
+                    {item.brand || ''}
+                    {item.generation ? ` / ${item.generation}` : ''}
                   </span>
-                  <span className="muted">Amazon {formatYen(item.latest_amazon?.price_yen)}</span>
+                  <div className="tracked-price-dual">
+                    <span>
+                      <em className="legend-kakaku">価格.com</em> {formatYen(item.latest_kakaku?.price_yen)}
+                    </span>
+                    <span>
+                      <em className="legend-amazon">Amazon</em> {formatYen(item.latest_amazon?.price_yen)}
+                    </span>
+                  </div>
                 </div>
+                <DualPriceChart
+                  kakakuHistory={item.kakaku_history}
+                  amazonHistory={item.amazon_history}
+                />
+                <KeepaGraphFold
+                  graphUrl={item.keepa_graph_url}
+                  productUrl={item.keepa_product_url}
+                />
                 <div className="tracked-item-actions">
                   {item.kakaku_url && (
                     <a className="btn ghost" href={item.kakaku_url} target="_blank" rel="noreferrer">
@@ -313,6 +330,16 @@ export function PricesPage({ showToast }: Props) {
                   {item.amazon_url && (
                     <a className="btn ghost" href={item.amazon_url} target="_blank" rel="noreferrer">
                       Amazon
+                    </a>
+                  )}
+                  {item.keepa_product_url && (
+                    <a
+                      className="btn ghost"
+                      href={item.keepa_product_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Keepa
                     </a>
                   )}
                 </div>

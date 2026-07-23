@@ -231,6 +231,14 @@ export interface NewsPayload {
   [key: string]: unknown
 }
 
+export interface PriceHistoryPoint {
+  price_yen?: number | null
+  fetched_at?: string
+  source?: string
+  url?: string | null
+  note?: string | null
+}
+
 export interface PricePart {
   id: string
   name: string
@@ -242,6 +250,8 @@ export interface PricePart {
   keep_legacy?: boolean
   latest_kakaku?: { price_yen?: number; url?: string; fetched_at?: string } | null
   latest_amazon?: { price_yen?: number; url?: string; fetched_at?: string } | null
+  kakaku_history?: PriceHistoryPoint[]
+  amazon_history?: PriceHistoryPoint[]
   kakaku_url?: string
   amazon_url?: string
   amazon_asin?: string | null
