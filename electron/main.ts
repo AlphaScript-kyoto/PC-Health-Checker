@@ -9,15 +9,20 @@ import {
   Notification,
   dialog,
 } from 'electron'
-import { spawn, execSync, type ChildProcess } from 'node:child_process'
+import { spawn, execSync, execFile, type ChildProcess } from 'node:child_process'
+import { promisify } from 'node:util'
 import fs from 'node:fs'
 import http from 'node:http'
+import os from 'node:os'
 import path from 'node:path'
+
+const execFileAsync = promisify(execFile)
 
 const HOST = '127.0.0.1'
 const PORT = 8787
 const BASE = `http://${HOST}:${PORT}`
 const APP_TITLE = 'PCの健康チェッカー'
+const VITE_ARG_PREFIX = '--pchc-vite='
 
 /** dist-electron の親 = プロジェクトルート */
 const ROOT = path.join(__dirname, '..')
@@ -26,6 +31,18 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let pyProc: ChildProcess | null = null
 let quitting = false
+
+function quoteForPsSingle(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+function getViteDevServerUrl(): string | undefined {
+  const fromEnv = process.env.VITE_DEV_SERVER_URL?.trim()
+  if (fromEnv) return fromEnv
+  const fromArg = process.argv.find((a) => a.startsWith(VITE_ARG_PREFIX))
+  if (fromArg) return fromArg.slice(VITE_ARG_PREFIX.length).trim() || undefined
+  return undefined
+}
 
 function pythonPath(): string {
   if (app.isPackaged) {
@@ -143,39 +160,80 @@ function isAdmin(): boolean {
   }
 }
 
-function relaunchElevated() {
-  const exe = process.execPath
-  // Dev: electron.exe にはアプリパスを渡す。Packaged: そのまま起動。
-  const appArgs = app.isPackaged ? [] : [ROOT]
-  const exeEsc = exe.replace(/'/g, "''")
-  const argsEsc = appArgs.map((a) => `'${String(a).replace(/'/g, "''")}'`).join(', ')
-  const argClause = appArgs.length ? ` -ArgumentList @(${argsEsc})` : ''
-  const workDir = (app.isPackaged ? path.dirname(exe) : ROOT).replace(/'/g, "''")
+/**
+ * UAC で管理者として同じアプリを起動する。
+ * Start-Process -Verb RunAs だと環境変数が消えるため、
+ * 「昇格した PowerShell の中」で VITE URL をセットしてから Electron を起動する。
+ */
+async function relaunchElevated(): Promise<boolean> {
+  if (process.platform !== 'win32') return false
+  if (isAdmin()) return true
 
-  quitting = true
-  stopBackend()
-  try {
-    app.releaseSingleInstanceLock()
-  } catch {
-    // ignore
+  const exe = process.execPath
+  const workDir = ROOT
+  const viteUrl = getViteDevServerUrl() ?? ''
+
+  // vite-plugin-electron 開発時: ['.', '--no-elevate'] など
+  const baseArgs = process.argv
+    .slice(1)
+    .filter((a) => a !== '--no-elevate' && !a.startsWith(VITE_ARG_PREFIX))
+  const electronArgs =
+    baseArgs.length > 0 ? [...baseArgs] : app.isPackaged ? [] : ['.']
+  if (viteUrl) {
+    electronArgs.push(`${VITE_ARG_PREFIX}${viteUrl}`)
   }
 
-  const ps = `
+  const argListPs = electronArgs.map(quoteForPsSingle).join(', ')
+  const elevatedWorker = `
 $ErrorActionPreference = 'Stop'
-Start-Sleep -Milliseconds 900
-try {
-  Start-Process -FilePath '${exeEsc}'${argClause} -WorkingDirectory '${workDir}' -Verb RunAs
-} catch {
-  Start-Process -FilePath '${exeEsc}'${argClause} -WorkingDirectory '${workDir}'
+$workDir = ${quoteForPsSingle(workDir)}
+Set-Location -LiteralPath $workDir
+${viteUrl ? `$env:VITE_DEV_SERVER_URL = ${quoteForPsSingle(viteUrl)}` : ''}
+$exe = ${quoteForPsSingle(exe)}
+$argList = @(${argListPs})
+if ($argList.Count -gt 0) {
+  Start-Process -FilePath $exe -ArgumentList $argList -WorkingDirectory $workDir
+} else {
+  Start-Process -FilePath $exe -WorkingDirectory $workDir
 }
-`
-  spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  }).unref()
+`.trim()
 
-  app.quit()
+  const workerPath = path.join(
+    os.tmpdir(),
+    `pchc-elevated-${process.pid}-${Date.now()}.ps1`,
+  )
+  const launcherPath = path.join(
+    os.tmpdir(),
+    `pchc-elevate-launch-${process.pid}-${Date.now()}.ps1`,
+  )
+  const launcher = `
+$ErrorActionPreference = 'Stop'
+$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',${quoteForPsSingle(workerPath)})
+if ($null -eq $p) { exit 1 }
+exit $p.ExitCode
+`.trim()
+
+  try {
+    fs.writeFileSync(workerPath, elevatedWorker, 'utf8')
+    fs.writeFileSync(launcherPath, launcher, 'utf8')
+    await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', launcherPath],
+      { windowsHide: true },
+    )
+    return true
+  } catch (error) {
+    console.error('elevation failed', error)
+    return false
+  } finally {
+    for (const p of [workerPath, launcherPath]) {
+      try {
+        fs.unlinkSync(p)
+      } catch {
+        // ignore
+      }
+    }
+  }
 }
 
 function createWindow() {
@@ -200,7 +258,7 @@ function createWindow() {
     mainWindow?.show()
   })
 
-  const viteUrl = process.env.VITE_DEV_SERVER_URL?.trim()
+  const viteUrl = getViteDevServerUrl()
   if (viteUrl) {
     void mainWindow.loadURL(viteUrl)
   } else {
@@ -248,7 +306,20 @@ function createTray() {
     },
     {
       label: '管理者として再起動',
-      click: () => relaunchElevated(),
+      click: () => {
+        void (async () => {
+          if (isAdmin()) return
+          app.releaseSingleInstanceLock()
+          const ok = await relaunchElevated()
+          if (ok) {
+            quitting = true
+            stopBackend()
+            app.quit()
+          } else {
+            app.requestSingleInstanceLock()
+          }
+        })()
+      },
     },
     { type: 'separator' },
     {
@@ -271,8 +342,27 @@ function createTray() {
 function registerIpc() {
   ipcMain.handle('desktop:elevate', async () => {
     if (isAdmin()) return true
-    relaunchElevated()
-    return true
+
+    // 先にロックを外さないと、昇格プロセスが「2つ目」扱いですぐ終了する
+    app.releaseSingleInstanceLock()
+
+    const ok = await relaunchElevated()
+    if (ok) {
+      quitting = true
+      stopBackend()
+      app.quit()
+      return true
+    }
+
+    app.requestSingleInstanceLock()
+    await dialog.showMessageBox({
+      type: 'warning',
+      title: APP_TITLE,
+      message: '管理者権限が許可されませんでした。',
+      detail:
+        'もう一度「管理者として再起動」を押すか、このまま非管理者で利用できます（SMART が不完全なことがあります）。',
+    })
+    return false
   })
 
   ipcMain.handle('desktop:openPath', async (_event, targetPath: string) => {

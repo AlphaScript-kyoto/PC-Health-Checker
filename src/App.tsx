@@ -81,7 +81,12 @@ export default function App() {
     setElevating(true)
     showToast('管理者権限の確認画面を開いています…')
     try {
-      await api.elevate()
+      const ok = await api.elevate()
+      if (ok) {
+        showToast('管理者として再起動します')
+      } else {
+        showToast('管理者権限は許可されませんでした')
+      }
     } catch {
       showToast('管理者昇格に失敗しました')
     } finally {
