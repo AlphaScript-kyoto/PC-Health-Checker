@@ -825,14 +825,32 @@ function registerIpc() {
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
-  // トレイ常駐の quit() だと残ることがあるため exit
-  app.exit(0)
+  // トレイ常駐や管理者起動の残骸があると、開発の vite ごと落ちて「何も起きない」ように見える
+  app.whenReady().then(() => {
+    try {
+      dialog.showMessageBoxSync({
+        type: 'info',
+        title: APP_TITLE,
+        message: 'パソコンちぇっ君はすでに起動しています。',
+        detail:
+          '通知領域（トレイ）のアイコンを右クリックして、「表示」または「終了」を選んでください。\n\n' +
+          '管理者で起動したままのときは、そのウィンドウ／トレイ側を終了してから、もう一度開いてください。',
+        buttons: ['OK'],
+      })
+    } catch (error) {
+      console.error('second-instance notice failed', error)
+    }
+    app.exit(0)
+  })
 } else {
   // 管理者で起動した側が、昇格前の旧プロセスを必ず落とす
   takeoverFromNonElevatedPredecessor()
 
   app.on('second-instance', () => {
-    if (mainWindow) {
+    // トレイ常駐中に再起動されたら、既存ウィンドウを前面へ
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createWindow()
+    } else {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.show()
       mainWindow.focus()

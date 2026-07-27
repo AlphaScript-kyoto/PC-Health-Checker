@@ -27,11 +27,24 @@ if not exist "backend\.venv\Scripts\python.exe" (
   echo.
 )
 
+echo 古い常駐プロセスがあれば終了します...
+echo （管理者で残っている場合は UAC 確認が出ることがあります）
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop_dev_electron.ps1"
+if errorlevel 1 (
+  echo.
+  echo [注意] 古いプロセスを消しきれませんでした。
+  echo 画面右下トレイの「パソコンちぇっ君」を右クリック →「終了」してから再実行してください。
+  echo.
+  pause
+)
+
 echo パソコンちぇっ君を起動しています（npm run dev）...
-echo このウィンドウは閉じないでください。終了するときは Ctrl+C か、トレイから終了してください。
+echo このウィンドウは閉じないでください。終了するときは Ctrl+C か、トレイから「終了」してください。
 echo.
 call npm run dev
+set "EXITCODE=%ERRORLEVEL%"
 echo.
 echo アプリが終了しました。エラーが出ていたら上のメッセージを確認してください。
+echo ※ 「すでに起動しています」と出た場合は、トレイから終了して再実行してください。
 pause
-exit /b %errorlevel%
+exit /b %EXITCODE%
