@@ -648,8 +648,8 @@ async function openDiskDetailWindow(deviceId: string): Promise<boolean> {
 
   const iconPath = resolveAppIconPath()
   const win = new BrowserWindow({
-    width: 980,
-    height: 820,
+    width: 1040,
+    height: 780,
     minWidth: 720,
     minHeight: 560,
     title: `${APP_TITLE} — ディスク詳細`,

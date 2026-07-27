@@ -64,8 +64,7 @@ export function DiskDetailApp({ deviceId }: Props) {
     <div className="disk-detail-shell">
       <header className="disk-detail-top">
         <div>
-          <p className="disk-detail-brand">パソコンちぇっ君</p>
-          <h1>ディスク詳細</h1>
+          <p className="disk-detail-brand">パソコンちぇっ君 / ディスク詳細</p>
         </div>
         <button type="button" className="btn ghost" onClick={() => window.close()}>
           閉じる

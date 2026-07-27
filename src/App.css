@@ -955,46 +955,112 @@
   height: 100%;
 }
 
+.disk-crystal-window {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  padding: 10px 12px 12px;
+}
+
+.disk-crystal-window .disk-crystal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.disk-crystal-window .disk-crystal-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.disk-crystal-window .disk-crystal-title h4 {
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.disk-crystal-window .disk-crystal-title p {
+  margin-top: 2px;
+  font-size: 11px;
+}
+
+.disk-crystal-window .disk-health-badge {
+  min-width: 58px;
+  min-height: 52px;
+  padding: 6px 8px;
+  border-radius: 12px;
+}
+
+.disk-crystal-window .disk-health-badge strong {
+  font-size: 16px;
+}
+
+.disk-crystal-window .disk-temp-pill {
+  margin-left: auto;
+  flex-shrink: 0;
+  align-self: flex-start;
+  min-width: 56px;
+  padding: 8px 12px;
+  font-size: 13px;
+  grid-column: auto;
+  justify-self: auto;
+}
+
+.disk-crystal-window .disk-kv-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+  flex: 0 0 auto;
+}
+
+.disk-crystal-window .disk-kv {
+  grid-template-columns: 7em minmax(0, 1fr);
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.disk-crystal-window .disk-kv dt {
+  font-size: 11px;
+}
+
+.disk-crystal-window .disk-kv dd {
+  font-size: 12px;
+}
+
 .disk-detail-shell {
   box-sizing: border-box;
   min-height: 100vh;
-  padding: 16px 18px 20px;
+  padding: 10px 14px 12px;
   background:
     radial-gradient(1200px 500px at 10% -10%, rgba(63, 124, 240, 0.16), transparent 55%),
     radial-gradient(900px 420px at 100% 0%, rgba(42, 157, 143, 0.12), transparent 50%),
     #eef3f7;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 
 .disk-detail-top {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   gap: 12px;
+  flex: 0 0 auto;
 }
 
 .disk-detail-brand {
   margin: 0;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--ink-soft);
 }
 
 .disk-detail-top h1 {
-  margin: 2px 0 0;
-  font-size: 20px;
+  margin: 0;
+  font-size: 16px;
   font-weight: 650;
-}
-
-.disk-crystal-window {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  overflow: hidden;
 }
 
 .smart-window-section {
@@ -1002,13 +1068,29 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 4px;
+  gap: 6px;
+  margin-top: 0;
 }
 
 .smart-window-section h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+
+.disk-crystal-window .smart-table-wrap-fill {
+  min-height: 0;
+}
+
+.disk-crystal-window .smart-table th,
+.disk-crystal-window .smart-table td {
+  padding: 4px 6px;
+}
+
+.disk-crystal-window .disk-reasons,
+.disk-crystal-window .disk-note {
+  margin-top: 4px;
+  font-size: 12px;
 }
 
 .smart-table {
@@ -1093,16 +1175,30 @@
     grid-template-columns: 1fr;
   }
 
-  .disk-crystal-head {
+  .disk-crystal:not(.disk-crystal-window) .disk-crystal-head {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .disk-temp-pill {
+  .disk-crystal:not(.disk-crystal-window) .disk-temp-pill {
     grid-column: 1 / -1;
     justify-self: start;
   }
 
-  .disk-kv-grid {
+  .disk-crystal:not(.disk-crystal-window) .disk-kv-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .disk-crystal-window .disk-kv-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .disk-crystal-window .disk-crystal-head {
+    flex-wrap: wrap;
+  }
+
+  .disk-crystal-window .disk-temp-pill {
+    margin-left: 0;
   }
 }
