@@ -582,17 +582,6 @@ async function loadRenderer(win: BrowserWindow, query?: Record<string, string>) 
   const search = new URLSearchParams(q).toString()
   const withQuery = (base: string) => (search ? `${base}${base.includes('?') ? '&' : '?'}${search}` : base)
 
-  // Windows では管理者プロセスから非管理者の Vite に繋がらないことがある。
-  // その場合はビルド済み UI（dist）をファイルとして開く。
-  if (isAdmin() && !app.isPackaged && fs.existsSync(distIndex)) {
-    try {
-      await win.loadFile(distIndex, { query: q })
-      return
-    } catch (error) {
-      console.error('failed to load dist as admin', error)
-    }
-  }
-
   const candidates: string[] = []
   const known = getViteDevServerUrl()
   if (known) {
@@ -606,6 +595,8 @@ async function loadRenderer(win: BrowserWindow, query?: Record<string, string>) 
     }
   }
 
+  // 開発中は Vite を優先（管理者でも、同じ権限で npm run dev していれば繋がる）。
+  // 管理者←非管理者 Vite のように跨げないときだけ、後段の dist にフォールバックする。
   for (const url of candidates) {
     if (!(await probeHttpUrl(url))) continue
     try {
@@ -617,6 +608,8 @@ async function loadRenderer(win: BrowserWindow, query?: Record<string, string>) 
     }
   }
 
+  // Windows では管理者プロセスから非管理者の Vite に繋がらないことがある。
+  // その場合はビルド済み UI（dist）をファイルとして開く。
   if (fs.existsSync(distIndex)) {
     try {
       await win.loadFile(distIndex, { query: q })
