@@ -3,7 +3,10 @@ import { statusJa } from '../lib/format'
 import type { DiskInfo, DiskSmartInfo, SmartAttributeRow } from '../types'
 
 function statusClass(status: string): string {
-  return status.toLowerCase().replace(/\s+/g, '')
+  const s = status.toLowerCase().replace(/\s+/g, '')
+  if (s === 'good') return 'ok'
+  if (s === 'ok') return 'ok'
+  return s
 }
 
 export function dash(value: unknown): string {
@@ -32,12 +35,31 @@ function formatPoh(smart?: DiskSmartInfo): string {
   return `${h} 時間（約 ${days} 日 / ${years} 年）`
 }
 
-function healthMeterJa(meter?: string, risk?: string): string {
-  const m = (meter || '').toLowerCase()
-  if (m === 'good') return '正常'
-  if (m === 'caution') return '注意'
-  if (m === 'bad') return '異常'
-  return statusJa(String(risk || 'Unknown'))
+/** バッジの文言と色を同じ判定に揃える（通電年数などの risk を優先） */
+function healthBadge(disk: DiskInfo, smart: DiskSmartInfo): { label: string; className: string; title: string } {
+  const risk = String(disk.risk_level || '').trim()
+  const meter = String(smart.health_meter || '').trim()
+  const smartOverall = dash(smart.overall)
+  const title = `総合リスク: ${risk || '—'} / SMART: ${meter || smartOverall}`
+
+  if (risk === 'Watch' || risk === 'ReplaceSoon' || risk === 'Critical') {
+    return { label: statusJa(risk), className: statusClass(risk), title }
+  }
+
+  const m = meter.toLowerCase()
+  if (m === 'caution') return { label: '注意', className: 'caution', title }
+  if (m === 'bad') return { label: '異常', className: 'bad', title }
+  if (m === 'good' || risk === 'OK' || risk === '') {
+    return { label: '正常', className: 'ok', title }
+  }
+  if (m === 'unknown' || risk === 'Unknown') {
+    return { label: '不明', className: 'unknown', title }
+  }
+  return {
+    label: statusJa(risk || 'Unknown'),
+    className: statusClass(risk || meter || 'Unknown'),
+    title,
+  }
 }
 
 function attrStatusClass(status?: string): string {
@@ -173,17 +195,16 @@ export function DiskDetailView({
   const smart = disk.smart || {}
   const table = smart.attribute_table || []
   const temp = smart.temperature_c
-  const meter = healthMeterJa(smart.health_meter, disk.risk_level)
-  const meterClass = statusClass(String(disk.risk_level || smart.health_meter || 'Unknown'))
+  const badge = healthBadge(disk, smart)
   const rows = buildDiskInfoRows(disk, smart, { showSerial })
   const isWindow = variant === 'window'
 
   return (
     <article className={`disk-crystal ${isWindow ? 'disk-crystal-window' : ''}`}>
       <header className="disk-crystal-head">
-        <div className={`disk-health-badge ${meterClass}`} title={`SMART: ${dash(smart.overall)}`}>
+        <div className={`disk-health-badge ${badge.className}`} title={badge.title}>
           <span>健康状態</span>
-          <strong>{meter}</strong>
+          <strong>{badge.label}</strong>
         </div>
         <div className="disk-crystal-title">
           <h4>
