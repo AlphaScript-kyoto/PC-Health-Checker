@@ -14,6 +14,13 @@ function statusClass(status: string): string {
 
 function dash(value: unknown): string {
   if (value === null || value === undefined || value === '') return '----'
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>
+    for (const key of ['name', 'string', 'ascii', 'value', 'label']) {
+      if (obj[key] != null && obj[key] !== '') return String(obj[key])
+    }
+    return '----'
+  }
   return String(value)
 }
 
@@ -88,6 +95,10 @@ function DiskCard({
     ],
     ['NVキャッシュ', dash(disk.nv_cache_size || smart.nv_cache_size)],
     ['回転数', dash(disk.rotation_label || smart.rotation_label || (disk.rotation_rate != null ? `${disk.rotation_rate} rpm` : null))],
+    [
+      '総書込み量（ホスト）',
+      smart.host_writes_gb != null ? `${smart.host_writes_gb} GB` : '----',
+    ],
     ['電源投入回数', smart.power_cycles != null ? `${smart.power_cycles} 回` : '----'],
     ['使用時間', formatPoh(smart)],
   ]
@@ -105,8 +116,10 @@ function DiskCard({
             {disk.size_gb != null ? ` ${disk.size_gb} GB` : ''}
           </h4>
           <p className="muted">
-            {disk.media_type || 'メディア不明'}
-            {disk.form_factor || smart.form_factor ? ` / ${disk.form_factor || smart.form_factor}` : ''}
+            {dash(disk.media_type) !== '----' ? dash(disk.media_type) : 'メディア不明'}
+            {dash(disk.form_factor || smart.form_factor) !== '----'
+              ? ` / ${dash(disk.form_factor || smart.form_factor)}`
+              : ''}
             {disk.health_status ? ` / OS: ${disk.health_status}` : ''}
             {smart.source ? ` / 取得元: ${smart.source}` : ''}
           </p>

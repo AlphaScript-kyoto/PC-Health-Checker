@@ -63,6 +63,9 @@ export interface DiskSmartInfo {
   power_on_days?: number
   power_on_years?: number
   power_cycles?: number
+  host_writes_gb?: number
+  host_writes_lba?: number
+  host_writes_bytes?: number
   source?: string
   note?: string
   needs_elevation?: boolean

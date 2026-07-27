@@ -33,6 +33,18 @@ ATTR_LABELS_JA: dict[str, str] = {
     "C8": "ライトエラー率",
     "F1": "総書込量",
     "F2": "総読込量",
+    "F6": "総書込セクタ数（ホスト）",
+    "F7": "総書込NANDページ（ホスト）",
+    "F8": "総書込NANDページ（FTL）",
+    "CA": "残り寿命",
+    "E7": "温度",
+    "E9": "コントローラ温度",
+    "EA": "残り寿命",
+    "Total_LBAs_Written": "総書込量",
+    "Total_LBAs_Read": "総読込量",
+    "Host_Program_Page_Count": "総書込NANDページ（ホスト）",
+    "FTL_Program_Page_Count": "総書込NANDページ（FTL）",
+    "Percent_Lifetime_Remain": "残り寿命",
     "Reallocated_Sector_Ct": "代替処理済セクタ数",
     "Power_On_Hours": "使用時間",
     "Power_Cycle_Count": "電源投入回数",
@@ -619,7 +631,7 @@ def _normalize_smartctl_json(data: dict[str, Any]) -> dict[str, Any]:
         "model_family": (data.get("model_family") or None),
         "firmware": (data.get("firmware_version") or None),
         "serial": (data.get("serial_number") or None),
-        "form_factor": (data.get("form_factor") or None),
+        "form_factor": _normalize_form_factor(data.get("form_factor")),
         "rotation_rate": data.get("rotation_rate"),
         "logical_block_size": (data.get("logical_block_size") or None),
         "user_capacity_bytes": ((data.get("user_capacity") or {}).get("bytes")),
@@ -1054,8 +1066,104 @@ def _flag_critical_raw(smart: dict[str, Any]) -> dict[str, Any]:
     return smart
 
 
+def _raw_to_int(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    text = str(raw).strip().replace(",", "").replace(" ", "")
+    if not text:
+        return None
+    # CrystalDiskInfo 風の 16進 raw（例: 00315ECF7DDE）
+    if re.fullmatch(r"[0-9A-Fa-f]+", text) and re.search(r"[A-Fa-f]", text):
+        try:
+            return int(text, 16)
+        except ValueError:
+            return None
+    m = re.match(r"(\d+)", text)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_form_factor(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        for key in ("name", "string", "ascii", "value"):
+            if value.get(key):
+                return str(value[key]).strip() or None
+    return str(value).strip() or None
+
+
+def _find_attr_raw(smart: dict[str, Any], *, ids: set[str], names: set[str]) -> int | None:
+    for row in smart.get("attribute_table") or []:
+        aid = str(row.get("id") or "").upper()
+        name = str(row.get("name") or "")
+        if aid in ids or name in names:
+            parsed = _raw_to_int(row.get("raw"))
+            if parsed is not None:
+                return parsed
+    attrs = smart.get("attributes") or {}
+    for name in names:
+        if name in attrs:
+            parsed = _raw_to_int(attrs.get(name))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _enrich_host_io_totals(smart: dict[str, Any]) -> None:
+    """CrystalDiskInfo 風の総書込み量（ホスト）を GB 換算して載せる。"""
+    sector = smart.get("logical_block_size")
+    try:
+        sector_i = int(sector) if sector else 512
+    except (TypeError, ValueError):
+        sector_i = 512
+    if sector_i <= 0:
+        sector_i = 512
+
+    # SATA SSD: F1 / F6 / Total_LBAs_Written（セクタ数）
+    lbas = _find_attr_raw(
+        smart,
+        ids={"F1", "F6", "241"},
+        names={"Total_LBAs_Written", "Host_Writes", "Total_LBAs_Written"},
+    )
+    if lbas is not None and lbas > 0:
+        bytes_written = lbas * sector_i
+        smart["host_writes_lba"] = lbas
+        smart["host_writes_bytes"] = bytes_written
+        # CrystalDiskInfo に近い表示（10進 GB）
+        smart["host_writes_gb"] = round(bytes_written / 1_000_000_000, 1)
+        return
+
+    # NVMe: Data Units Written（1 unit = 1000 × 512 bytes が一般的）
+    units = smart.get("data_units_written")
+    if units is None:
+        units = _find_attr_raw(smart, ids=set(), names={"Data_Units_Written"})
+    parsed_units = _raw_to_int(units)
+    if parsed_units is not None and parsed_units > 0:
+        bytes_written = parsed_units * 1000 * 512
+        smart["host_writes_lba"] = parsed_units
+        smart["host_writes_bytes"] = bytes_written
+        smart["host_writes_gb"] = round(bytes_written / 1_000_000_000, 1)
+
+
 def _enrich_summary(smart: dict[str, Any]) -> dict[str, Any]:
     """Add CrystalDiskInfo-like summary fields."""
+    ff = _normalize_form_factor(smart.get("form_factor"))
+    if ff:
+        smart["form_factor"] = ff
+
     poh = smart.get("power_on_hours")
     if poh is not None:
         try:
@@ -1081,6 +1189,7 @@ def _enrich_summary(smart: dict[str, Any]) -> dict[str, Any]:
     else:
         smart["health_meter"] = "Unknown"
 
+    _enrich_host_io_totals(smart)
     smart["smartctl_available"] = _smartctl_available()
     return smart
 
