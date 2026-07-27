@@ -84,9 +84,12 @@ export function buildDiskInfoRows(
     ],
     [
       'バッファサイズ',
-      disk.buffer_size_kb != null || smart.buffer_size_kb != null
-        ? `${disk.buffer_size_kb ?? smart.buffer_size_kb} KB`
-        : '----',
+      (() => {
+        const kb = disk.buffer_size_kb ?? smart.buffer_size_kb
+        if (kb == null) return '----'
+        const src = disk.buffer_size_source || smart.buffer_size_source
+        return src === 'model_db' ? `${kb} KB（公称値）` : `${kb} KB`
+      })(),
     ],
     ['NVキャッシュ', dash(disk.nv_cache_size || smart.nv_cache_size)],
     [

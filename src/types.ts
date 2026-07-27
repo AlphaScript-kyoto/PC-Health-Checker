@@ -78,6 +78,7 @@ export interface DiskSmartInfo {
   features?: string[]
   features_text?: string
   buffer_size_kb?: number | null
+  buffer_size_source?: string
   nv_cache_size?: string | null
   rotation_rate?: number | null
   rotation_label?: string
@@ -110,6 +111,7 @@ export interface DiskInfo {
   features?: string[]
   features_text?: string
   buffer_size_kb?: number | null
+  buffer_size_source?: string
   nv_cache_size?: string | null
   rotation_rate?: number | null
   rotation_label?: string

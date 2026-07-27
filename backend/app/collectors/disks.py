@@ -752,6 +752,97 @@ def _smartctl_identity_text(index: int) -> str:
         return ""
 
 
+def _smartctl_identify_text(index: int) -> str:
+    """ATA IDENTIFY DEVICE のワード一覧（バッファサイズは word 21）。"""
+    try:
+        result = subprocess.run(
+            ["smartctl", "--identify=wn", f"/dev/pd{index}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+        return (result.stdout or "") + "\n" + (result.stderr or "")
+    except Exception:
+        return ""
+
+
+def _buffer_kb_from_identify_word21(text: str) -> int | None:
+    """
+    ATA IDENTIFY word 21: Buffer size in 512-byte increments（旧規格・OBS）。
+    CrystalDiskInfo もここを読む。0 / 0xFFFF は未報告。
+    """
+    # 例: "  21      0x4000   Vendor specific..." or "21 4000h ..."
+    m = re.search(r"^\s*21\s+(?:0x)?([0-9A-Fa-f]+)\b", text, re.M)
+    if not m:
+        m = re.search(r"^\s*21\s+[^\d]*?(\d+)\s*(?:\(.*\))?\s*$", text, re.M)
+        if m:
+            try:
+                word = int(m.group(1))
+            except ValueError:
+                return None
+        else:
+            return None
+    else:
+        try:
+            word = int(m.group(1), 16)
+        except ValueError:
+            return None
+    if word in (0, 0xFFFF):
+        return None
+    # word × 512 bytes → KB
+    return int(word * 512 // 1024)
+
+
+# CrystalDiskInfo 同様、IDENTIFY が空のときの既知モデル補完（公称キャッシュ）
+_BUFFER_KB_MODEL_HINTS: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(r"HTS541010A9E680|Travelstar\s*5K1000", re.I), 8192),  # 8 MB
+    (re.compile(r"HTS5410", re.I), 8192),
+    (re.compile(r"WD10EZEX|WD20EZRZ|WD20EZRX|WD30EZRZ|WD40EZRZ", re.I), 65536),  # 64 MB 系
+]
+
+
+def _buffer_kb_from_model_hint(model: str | None, family: str | None = None) -> int | None:
+    blob = f"{model or ''} {family or ''}"
+    for pattern, kb in _BUFFER_KB_MODEL_HINTS:
+        if pattern.search(blob):
+            return kb
+    return None
+
+
+def _resolve_buffer_size_kb(
+    *,
+    index: int | None,
+    smart: dict[str, Any],
+    model: str | None = None,
+) -> None:
+    """バッファサイズを smartctl -i / IDENTIFY / モデル補完の順で埋める。"""
+    if smart.get("buffer_size_kb") not in (None, "", 0):
+        smart.setdefault("buffer_size_source", "smartctl_text")
+        return
+
+    # 1) IDENTIFY word 21（CrystalDiskInfo と同じ系統）
+    if index is not None:
+        ident = _smartctl_identify_text(index)
+        kb = _buffer_kb_from_identify_word21(ident)
+        if kb:
+            smart["buffer_size_kb"] = kb
+            smart["buffer_size_source"] = "ata_identify"
+            return
+
+    # 2) モデル/ファミリの公称値（IDENTIFY が 0 の古いノートPC HDD など）
+    family = smart.get("model_family")
+    kb = _buffer_kb_from_model_hint(model or smart.get("model_name"), family if isinstance(family, str) else None)
+    if kb:
+        smart["buffer_size_kb"] = kb
+        smart["buffer_size_source"] = "model_db"
+        return
+
+    smart["buffer_size_source"] = "unavailable"
+
+
 def _collect_smart_for_index(index: int) -> dict[str, Any] | None:
     if not _smartctl_available():
         return None
@@ -775,6 +866,15 @@ def _collect_smart_for_index(index: int) -> dict[str, Any] | None:
                 ident_text = _smartctl_identity_text(index)
                 if ident_text.strip():
                     _merge_identity(smart, _parse_identity_from_text(ident_text))
+                if not smart.get("model_name"):
+                    smart["model_name"] = data.get("model_name")
+                if not smart.get("model_family"):
+                    smart["model_family"] = data.get("model_family")
+                _resolve_buffer_size_kb(
+                    index=index,
+                    smart=smart,
+                    model=data.get("model_name") or smart.get("model_name"),
+                )
                 return smart
             except json.JSONDecodeError:
                 pass
@@ -790,7 +890,11 @@ def _collect_smart_for_index(index: int) -> dict[str, Any] | None:
         )
         text = (result2.stdout or "") + "\n" + (result.stdout or "")
         if text.strip():
-            return _parse_smartctl(text)
+            smart = _parse_smartctl(text)
+            model_m = re.search(r"Device Model:\s*(.+)", text, re.I)
+            model = model_m.group(1).strip() if model_m else None
+            _resolve_buffer_size_kb(index=index, smart=smart, model=model)
+            return smart
     except Exception:
         return None
     return None
@@ -1355,6 +1459,7 @@ Get-PhysicalDisk | Select-Object `
             "features",
             "features_text",
             "buffer_size_kb",
+            "buffer_size_source",
             "nv_cache_size",
             "rotation_rate",
             "rotation_label",
@@ -1362,6 +1467,14 @@ Get-PhysicalDisk | Select-Object `
         ):
             if smart.get(key) is not None and disk.get(key) in (None, "", []):
                 disk[key] = smart[key]
+        # form_factor は必ず文字列（[object Object] 防止）
+        ff = _normalize_form_factor(disk.get("form_factor") or smart.get("form_factor"))
+        if ff:
+            disk["form_factor"] = ff
+            smart["form_factor"] = ff
+        else:
+            disk.pop("form_factor", None)
+            smart.pop("form_factor", None)
         if not disk.get("firmware"):
             disk["firmware"] = smart.get("firmware")
         if not disk.get("serial"):
