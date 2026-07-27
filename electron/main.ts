@@ -69,6 +69,7 @@ const ROOT = app.isPackaged ? app.getAppPath() : path.join(__dirname, '..')
 }
 
 let mainWindow: BrowserWindow | null = null
+const diskDetailWindows = new Map<string, BrowserWindow>()
 let tray: Tray | null = null
 let pyProc: ChildProcess | null = null
 let quitting = false
@@ -575,14 +576,17 @@ function normalizeDevUrl(url: string): string {
   return url.replace('://localhost', '://127.0.0.1')
 }
 
-async function loadRenderer(win: BrowserWindow) {
+async function loadRenderer(win: BrowserWindow, query?: Record<string, string>) {
   const distIndex = path.join(ROOT, 'dist', 'index.html')
+  const q = query || {}
+  const search = new URLSearchParams(q).toString()
+  const withQuery = (base: string) => (search ? `${base}${base.includes('?') ? '&' : '?'}${search}` : base)
 
   // Windows では管理者プロセスから非管理者の Vite に繋がらないことがある。
   // その場合はビルド済み UI（dist）をファイルとして開く。
   if (isAdmin() && !app.isPackaged && fs.existsSync(distIndex)) {
     try {
-      await win.loadFile(distIndex)
+      await win.loadFile(distIndex, { query: q })
       return
     } catch (error) {
       console.error('failed to load dist as admin', error)
@@ -605,7 +609,7 @@ async function loadRenderer(win: BrowserWindow) {
   for (const url of candidates) {
     if (!(await probeHttpUrl(url))) continue
     try {
-      await win.loadURL(url)
+      await win.loadURL(withQuery(url))
       persistViteDevServerUrl(url)
       return
     } catch (error) {
@@ -615,7 +619,7 @@ async function loadRenderer(win: BrowserWindow) {
 
   if (fs.existsSync(distIndex)) {
     try {
-      await win.loadFile(distIndex)
+      await win.loadFile(distIndex, { query: q })
       return
     } catch (error) {
       console.error('failed to load dist index', error)
@@ -629,6 +633,52 @@ async function loadRenderer(win: BrowserWindow) {
       `<!doctype html><html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#eef3f7;color:#1c2430"><h2>パソコンちぇっ君</h2><p>${message}</p></body></html>`,
     )}`,
   )
+}
+
+async function openDiskDetailWindow(deviceId: string): Promise<boolean> {
+  const id = String(deviceId || '').trim()
+  if (!id) return false
+
+  const existing = diskDetailWindows.get(id)
+  if (existing && !existing.isDestroyed()) {
+    existing.show()
+    existing.focus()
+    return true
+  }
+
+  const iconPath = resolveAppIconPath()
+  const win = new BrowserWindow({
+    width: 980,
+    height: 820,
+    minWidth: 720,
+    minHeight: 560,
+    title: `${APP_TITLE} — ディスク詳細`,
+    backgroundColor: '#eef3f7',
+    autoHideMenuBar: true,
+    show: false,
+    ...(iconPath ? { icon: iconPath } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  })
+
+  diskDetailWindows.set(id, win)
+  win.once('ready-to-show', () => win.show())
+  win.on('closed', () => {
+    if (diskDetailWindows.get(id) === win) diskDetailWindows.delete(id)
+  })
+
+  try {
+    await loadRenderer(win, { view: 'disk', id })
+    return true
+  } catch (error) {
+    console.error('failed to open disk detail window', error)
+    if (!win.isDestroyed()) win.close()
+    return false
+  }
 }
 
 function createWindow() {
@@ -767,6 +817,10 @@ function registerIpc() {
   })
 
   ipcMain.handle('desktop:getBackendUrl', async () => BASE)
+
+  ipcMain.handle('desktop:openDiskDetail', async (_event, deviceId: string) => {
+    return openDiskDetailWindow(String(deviceId || ''))
+  })
 }
 
 const gotLock = app.requestSingleInstanceLock()

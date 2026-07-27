@@ -948,6 +948,69 @@
   box-shadow: inset 0 0 0 1px var(--line);
 }
 
+.smart-table-wrap-fill {
+  flex: 1;
+  min-height: 240px;
+  max-height: none;
+  height: 100%;
+}
+
+.disk-detail-shell {
+  box-sizing: border-box;
+  min-height: 100vh;
+  padding: 16px 18px 20px;
+  background:
+    radial-gradient(1200px 500px at 10% -10%, rgba(63, 124, 240, 0.16), transparent 55%),
+    radial-gradient(900px 420px at 100% 0%, rgba(42, 157, 143, 0.12), transparent 50%),
+    #eef3f7;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.disk-detail-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.disk-detail-brand {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+.disk-detail-top h1 {
+  margin: 2px 0 0;
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.disk-crystal-window {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.smart-window-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.smart-window-section h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
 .smart-table {
   width: 100%;
   border-collapse: collapse;
