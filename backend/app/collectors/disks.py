@@ -307,9 +307,13 @@ def _parse_identity_from_text(text: str) -> dict[str, Any]:
     m = re.search(r"Rotation Rate:\s*(.+)", text, re.I)
     if m:
         rr = m.group(1).strip()
-        if re.search(r"Solid State|SSD|0\s*rpm", rr, re.I):
+        if re.search(r"Solid State Device|Solid State\b|\bSSD\b", rr, re.I):
             ident["rotation_rate"] = 0
             ident["rotation_label"] = "SSD（回転なし）"
+        elif re.search(r"0\s*rpm", rr, re.I):
+            # 0 rpm 単体は未報告のことも多い → 後段で MediaType/SMART と突き合わせる
+            ident["rotation_rate"] = 0
+            ident["rotation_label"] = "不明"
         else:
             num = re.search(r"(\d+)", rr)
             if num:
@@ -430,7 +434,14 @@ def _identity_from_smartctl_json(data: dict[str, Any]) -> dict[str, Any]:
         try:
             rr_i = int(rr)
             ident["rotation_rate"] = rr_i
-            ident["rotation_label"] = "SSD（回転なし）" if rr_i == 0 else f"{rr_i} rpm"
+            # smartctl JSON の 0 は SSD であることが多いが、確定は後段で行う
+            if rr_i > 1:
+                ident["rotation_label"] = f"{rr_i} rpm"
+            elif rr_i == 0:
+                ident["rotation_label"] = "不明"
+            else:
+                # ATA の 1 = non-rotating
+                ident["rotation_label"] = "SSD（回転なし）"
         except (TypeError, ValueError):
             pass
 
@@ -500,6 +511,104 @@ def _merge_identity(target: dict[str, Any], identity: dict[str, Any]) -> None:
             continue
         if target.get(key) in (None, "", [], "----"):
             target[key] = value
+
+
+def _has_hdd_smart_signals(smart: dict[str, Any] | None) -> bool:
+    """スピンアップ等の機械式HDDらしい SMART 属性があるか。"""
+    if not smart:
+        return False
+    hdd_names = {
+        "Spin_Up_Time",
+        "Spin_Retry_Count",
+        "Calibration_Retry_Count",
+        "Seek_Error_Rate",
+        "Load_Cycle_Count",
+        "Load_Unload_Cycle_Count",
+    }
+    # smartctl が付ける ID（16進2桁）
+    hdd_ids = {"03", "07", "0A", "0B", "C1"}
+    for row in smart.get("attribute_table") or []:
+        name = str(row.get("name") or "")
+        if name in hdd_names:
+            return True
+        aid = str(row.get("id") or "").upper().lstrip("0") or "0"
+        aid2 = str(row.get("id") or "").upper().zfill(2)[-2:]
+        if aid2 in hdd_ids or aid in {"3", "7", "A", "B"}:
+            return True
+    attrs = smart.get("attributes") or {}
+    return any(name in attrs for name in hdd_names)
+
+
+def _media_kind(disk: dict[str, Any], smart: dict[str, Any] | None) -> str:
+    """'hdd' | 'ssd' | 'unknown'"""
+    media = str(disk.get("media_type") or "").lower()
+    bus = str(disk.get("bus_type") or "").lower()
+    # HDD 証拠を先に見る（MediaType=Unspecified でも Spin_Up があれば HDD）
+    if _has_hdd_smart_signals(smart):
+        return "hdd"
+    if "hdd" in media or "hard" in media:
+        return "hdd"
+    if "ssd" in media or "solid" in media or bus == "nvme":
+        return "ssd"
+    return "unknown"
+
+
+def _apply_rotation_fields(disk: dict[str, Any], smart: dict[str, Any]) -> None:
+    """
+    回転数ラベルを確定する。
+
+    - Windows SpindleSpeed=0 は「不明」であり SSD ではない
+    - Spin_Up_Time 等があれば確実に HDD
+    - smartctl の rotation_rate=0 は SSD のことが多いが、HDD証拠があれば無視
+    """
+    kind = _media_kind(disk, smart)
+    rate: int | None = None
+    for src in (smart.get("rotation_rate"), disk.get("rotation_rate")):
+        if src is None:
+            continue
+        try:
+            value = int(src)
+        except (TypeError, ValueError):
+            continue
+        if value > 1:
+            rate = value
+            break
+
+    if kind == "unknown":
+        # HDD証拠なしで rate=0 のみ → smartctl 由来なら SSD 扱い
+        zeros_only = False
+        for src in (smart.get("rotation_rate"), disk.get("rotation_rate")):
+            try:
+                if src is not None and int(src) == 0:
+                    zeros_only = True
+            except (TypeError, ValueError):
+                pass
+        if zeros_only and smart.get("source") == "smartctl":
+            kind = "ssd"
+
+    if kind == "ssd":
+        label = "SSD（回転なし）"
+        disk["rotation_rate"] = 0
+        smart["rotation_rate"] = 0
+    elif kind == "hdd":
+        label = f"{rate} rpm" if rate and rate > 1 else "HDD（回転数不明）"
+        if rate and rate > 1:
+            disk["rotation_rate"] = rate
+            smart["rotation_rate"] = rate
+        else:
+            disk.pop("rotation_rate", None)
+            if smart.get("rotation_rate") in (0, 1):
+                smart.pop("rotation_rate", None)
+    else:
+        label = f"{rate} rpm" if rate and rate > 1 else "不明"
+        if rate and rate > 1:
+            disk["rotation_rate"] = rate
+            smart["rotation_rate"] = rate
+        else:
+            disk.pop("rotation_rate", None)
+
+    disk["rotation_label"] = label
+    smart["rotation_label"] = label
 
 
 def _normalize_smartctl_json(data: dict[str, Any]) -> dict[str, Any]:
@@ -1028,8 +1137,12 @@ Get-PhysicalDisk | Select-Object `
         if spindle is not None:
             try:
                 sp = int(spindle)
-                disk["rotation_rate"] = sp
-                disk["rotation_label"] = "SSD（回転なし）" if sp == 0 else f"{sp} rpm"
+                # Windows の SpindleSpeed=0 は「不明」であり SSD ではない
+                if sp > 1:
+                    disk["rotation_rate"] = sp
+                    disk["rotation_label"] = f"{sp} rpm"
+                else:
+                    disk["rotation_label"] = "不明"
             except (TypeError, ValueError):
                 pass
 
@@ -1144,6 +1257,9 @@ Get-PhysicalDisk | Select-Object `
             disk["firmware"] = smart.get("firmware")
         if not disk.get("serial"):
             disk["serial"] = smart.get("serial")
+
+        # 回転数は MediaType / SMART属性で最終確定（SpindleSpeed=0 の誤SSD判定を防ぐ）
+        _apply_rotation_fields(disk, smart)
 
         disk["smart"] = smart
         disks.append(disk)
