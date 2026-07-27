@@ -6,5 +6,5 @@ if %errorlevel% neq 0 (
   powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
   exit /b
 )
-call "%~dp0run_app.bat"
+call "%~dp0run_app.bat" silent
 exit /b %errorlevel%
