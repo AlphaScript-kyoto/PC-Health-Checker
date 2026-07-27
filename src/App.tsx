@@ -141,13 +141,26 @@ export default function App() {
       return
     }
     setElevating(true)
-    showToast('画面を準備してから、管理者で開き直します…')
+    const wasElevated = elevated
+    showToast(
+      wasElevated
+        ? '画面を最新の内容に更新しています…'
+        : '画面を準備してから、管理者で開き直します…',
+    )
     try {
       const ok = await api.elevate()
       if (ok) {
-        showToast('管理者として開き直します…')
+        showToast(
+          wasElevated
+            ? '画面を更新しました。ディスク表示を確認してみてください'
+            : '管理者として開き直します…',
+        )
       } else {
-        showToast('管理者での再起動をキャンセルしたか、起動に失敗しました')
+        showToast(
+          wasElevated
+            ? '画面の更新に失敗しました'
+            : '管理者での再起動をキャンセルしたか、起動に失敗しました',
+        )
       }
     } catch {
       showToast('管理者昇格に失敗しました')

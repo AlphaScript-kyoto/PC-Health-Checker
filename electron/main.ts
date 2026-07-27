@@ -459,13 +459,129 @@ async function waitForElevateReady(timeoutMs: number): Promise<boolean> {
   return false
 }
 
+function probeHttpUrl(url: string, timeoutMs = 1000): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const req = http.get(url, (res) => {
+        res.resume()
+        resolve((res.statusCode ?? 500) < 500)
+      })
+      req.on('error', () => resolve(false))
+      req.setTimeout(timeoutMs, () => {
+        req.destroy()
+        resolve(false)
+      })
+    } catch {
+      resolve(false)
+    }
+  })
+}
+
+function normalizeDevUrl(url: string): string {
+  return url.replace('://localhost', '://127.0.0.1')
+}
+
+async function buildRendererForElevation(): Promise<boolean> {
+  const distIndex = path.join(ROOT, 'dist', 'index.html')
+  const before = fs.existsSync(distIndex) ? fs.statSync(distIndex).mtimeMs : 0
+  try {
+    const viteCmd = path.join(
+      ROOT,
+      'node_modules',
+      '.bin',
+      process.platform === 'win32' ? 'vite.cmd' : 'vite',
+    )
+    const command = fs.existsSync(viteCmd)
+      ? viteCmd
+      : process.platform === 'win32'
+        ? 'npx.cmd'
+        : 'npx'
+    const args = fs.existsSync(viteCmd)
+      ? ['build', '--config', 'vite.renderer.config.ts']
+      : ['vite', 'build', '--config', 'vite.renderer.config.ts']
+
+    await execFileAsync(command, args, {
+      cwd: ROOT,
+      windowsHide: true,
+      timeout: 180000,
+      env: { ...process.env },
+      shell: process.platform === 'win32',
+    })
+    if (!fs.existsSync(distIndex)) return false
+    const after = fs.statSync(distIndex).mtimeMs
+    // ビルドが動いて index が更新されたことを確認（古い dist のまま昇格しない）
+    if (after <= before) {
+      console.error('renderer build produced no newer dist/index.html')
+      // 同一秒内の再ビルドもあり得るので、中身があれば許容
+      return true
+    }
+    return true
+  } catch (error) {
+    console.error('renderer build for elevation failed', error)
+    return false
+  }
+}
+
+async function reloadAllRenderers(): Promise<void> {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue
+    try {
+      const current = win.webContents.getURL()
+      const q: Record<string, string> = {}
+      try {
+        const u = new URL(current)
+        u.searchParams.forEach((v, k) => {
+          q[k] = v
+        })
+      } catch {
+        const qi = current.indexOf('?')
+        if (qi >= 0) {
+          const qs = current.slice(qi + 1)
+          for (const part of qs.split('&')) {
+            if (!part) continue
+            const [k, v] = part.split('=')
+            if (k) q[decodeURIComponent(k)] = decodeURIComponent(v || '')
+          }
+        }
+      }
+      // dist の index.html 差し替え後も古い JS ハッシュを掴まないよう、読み込み直し
+      await loadRenderer(win, q)
+    } catch (error) {
+      console.error('reload renderer failed', error)
+      try {
+        win.webContents.reloadIgnoringCache()
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
 /**
  * 管理者として立ち上げ直す。
- * 旧ウィンドウは、管理者プロセスがロック取得＆ ready を書くまで閉じない。
+ * すでに管理者のときは UI を再ビルドしてキャッシュ無視で再読込する。
  */
 async function elevateAndQuit(): Promise<boolean> {
   if (process.platform !== 'win32') return false
-  if (isAdmin()) return true
+
+  // すでに管理者：再起動ボタンでも最新コードを取り込めるようにする
+  if (isAdmin()) {
+    if (!app.isPackaged) {
+      const built = await buildRendererForElevation()
+      if (!built) {
+        await dialog.showMessageBox({
+          type: 'warning',
+          title: APP_TITLE,
+          message: '画面の更新ビルドに失敗しました。',
+          detail:
+            '通常起動（run_app.vbs）に戻るか、ターミナルで npm run build を実行してから開き直してください。',
+        })
+        return false
+      }
+    }
+    await reloadAllRenderers()
+    return true
+  }
 
   stopBackend()
   const viteUrl = normalizeDevUrl(getViteDevServerUrl() || 'http://127.0.0.1:5173/')
@@ -476,6 +592,12 @@ async function elevateAndQuit(): Promise<boolean> {
     const built = await buildRendererForElevation()
     if (!built) {
       console.error('elevation aborted: renderer dist missing')
+      await dialog.showMessageBox({
+        type: 'warning',
+        title: APP_TITLE,
+        message: '管理者起動用の画面ビルドに失敗しました。',
+        detail: 'このまま非管理者で続けるか、npm run build のあと再度お試しください。',
+      })
       startBackend()
       return false
     }
@@ -531,49 +653,6 @@ async function elevateAndQuit(): Promise<boolean> {
       }
     }
   }
-}
-
-function probeHttpUrl(url: string, timeoutMs = 1000): Promise<boolean> {
-  return new Promise((resolve) => {
-    try {
-      const req = http.get(url, (res) => {
-        res.resume()
-        resolve((res.statusCode ?? 500) < 500)
-      })
-      req.on('error', () => resolve(false))
-      req.setTimeout(timeoutMs, () => {
-        req.destroy()
-        resolve(false)
-      })
-    } catch {
-      resolve(false)
-    }
-  })
-}
-
-async function buildRendererForElevation(): Promise<boolean> {
-  const distIndex = path.join(ROOT, 'dist', 'index.html')
-  try {
-    const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx'
-    await execFileAsync(
-      npx,
-      ['vite', 'build', '--config', 'vite.renderer.config.ts'],
-      {
-        cwd: ROOT,
-        windowsHide: true,
-        timeout: 180000,
-        env: { ...process.env },
-      },
-    )
-    return fs.existsSync(distIndex)
-  } catch (error) {
-    console.error('renderer build for elevation failed', error)
-    return fs.existsSync(distIndex)
-  }
-}
-
-function normalizeDevUrl(url: string): string {
-  return url.replace('://localhost', '://127.0.0.1')
 }
 
 async function loadRenderer(win: BrowserWindow, query?: Record<string, string>) {
@@ -743,9 +822,8 @@ function createTray() {
       label: '管理者として再起動',
       click: () => {
         void (async () => {
-          if (isAdmin()) return
           const ok = await elevateAndQuit()
-          if (!ok) {
+          if (!ok && !isAdmin()) {
             await dialog.showMessageBox({
               type: 'warning',
               title: APP_TITLE,
@@ -778,18 +856,18 @@ function registerIpc() {
   ipcMain.handle('desktop:is-admin', async () => isAdmin())
 
   ipcMain.handle('desktop:elevate', async () => {
-    if (isAdmin()) return true
-
     const ok = await elevateAndQuit()
     if (ok) return true
 
-    await dialog.showMessageBox({
-      type: 'warning',
-      title: APP_TITLE,
-      message: '管理者権限は許可されませんでした。',
-      detail:
-        'もう一度「管理者として再起動」を押すか、このまま非管理者で利用できます（SMART が不完全なことがあります）。',
-    })
+    if (!isAdmin()) {
+      await dialog.showMessageBox({
+        type: 'warning',
+        title: APP_TITLE,
+        message: '管理者権限は許可されませんでした。',
+        detail:
+          'もう一度「管理者として再起動」を押すか、このまま非管理者で利用できます（SMART が不完全なことがあります）。',
+      })
+    }
     return false
   })
 
