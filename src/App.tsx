@@ -33,6 +33,8 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [lastScannedAt, setLastScannedAt] = useState<string | null>(null)
   const autoScanStarted = useRef(false)
+  const lastSeenScanAt = useRef<string | null>(null)
+  const watchingBackground = useRef(false)
 
   const showToast = useCallback((message: string) => {
     setToast(message)
@@ -44,9 +46,14 @@ export default function App() {
   const refreshLastScan = useCallback(async () => {
     try {
       const status = await getStatus()
-      setLastScannedAt(status.scanned_at || null)
+      const at = status.scanned_at || null
+      setLastScannedAt(at)
+      if (at && !lastSeenScanAt.current) {
+        lastSeenScanAt.current = at
+      }
+      return at
     } catch {
-      // ignore
+      return null
     }
   }, [])
 
@@ -132,6 +139,77 @@ export default function App() {
     }, 1200)
     return () => window.clearTimeout(timer)
   }, [runScan])
+
+  // バックエンドの毎日スキャンなど、UI外で走った結果を取り込む
+  useEffect(() => {
+    let cancelled = false
+
+    const tick = async () => {
+      if (cancelled || scanning || watchingBackground.current) return
+      try {
+        const progress = await getScanProgress()
+        if (cancelled) return
+
+        if (progress.running) {
+          watchingBackground.current = true
+          setScanning(true)
+          setScanProgress(progress)
+          showToast('自動スキャンを検知しました…')
+          try {
+            for (;;) {
+              if (cancelled) break
+              await new Promise((r) => window.setTimeout(r, 500))
+              const next = await getScanProgress()
+              if (cancelled) break
+              setScanProgress(next)
+              if (!next.running) {
+                if (next.error) {
+                  showToast(`自動スキャンに失敗しました: ${next.error}`)
+                } else {
+                  const at = await refreshLastScan()
+                  if (at) lastSeenScanAt.current = at
+                  setRefreshKey((k) => k + 1)
+                  showToast('自動スキャンが完了しました')
+                }
+                break
+              }
+            }
+          } finally {
+            watchingBackground.current = false
+            setScanning(false)
+            window.setTimeout(() => {
+              setScanProgress((current) => (current?.running ? current : null))
+            }, 1800)
+          }
+          return
+        }
+
+        const status = await getStatus()
+        if (cancelled) return
+        const at = status.scanned_at || null
+        if (at && lastSeenScanAt.current && at !== lastSeenScanAt.current) {
+          lastSeenScanAt.current = at
+          setLastScannedAt(at)
+          setRefreshKey((k) => k + 1)
+          showToast('自動スキャンの結果を反映しました')
+        } else if (at && !lastSeenScanAt.current) {
+          lastSeenScanAt.current = at
+          setLastScannedAt(at)
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const id = window.setInterval(() => {
+      void tick()
+    }, 10000)
+    void tick()
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [scanning, showToast, refreshLastScan])
 
   const elevate = async () => {
     if (elevating) return

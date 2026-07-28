@@ -96,8 +96,33 @@ def _parse_daily_scan_time(value: Any) -> tuple[int, int]:
 
 
 def _run_scan_jobs(label: str) -> None:
-    result = run_scan(notify_alerts=True)
-    log.info("%s: %s", label, result.get("overall_status"))
+    """毎日スキャンは手動と同じく健康診断＋容量マップを並行実行する。"""
+    from app.notify import notify
+    from app.scanner import get_scan_progress, start_scan
+
+    log.info("%s starting…", label)
+    started = start_scan(notify_alerts=True)
+    if not started.get("started") and started.get("message") == "already running":
+        log.info("%s: another scan is already running — waiting for it", label)
+
+    deadline = time.time() + 60 * 45
+    while time.time() < deadline:
+        progress = get_scan_progress()
+        if not progress.get("running"):
+            break
+        time.sleep(1.0)
+    else:
+        log.warning("%s: timed out waiting for scan to finish", label)
+
+    last = None
+    try:
+        from app.scanner import get_last_scan
+
+        last = get_last_scan()
+    except Exception:
+        pass
+    log.info("%s finished: %s", label, (last or {}).get("overall_status"))
+
     try:
         from app.price_tracker import maybe_weekly_price_job
 
@@ -105,24 +130,35 @@ def _run_scan_jobs(label: str) -> None:
     except Exception:
         log.exception("Weekly price job failed")
 
+    try:
+        notify(APP_NAME, f"{label}が完了しました", open_dashboard=False)
+    except Exception:
+        log.exception("Daily scan notify failed")
+
 
 def _scheduler_loop() -> None:
-    """Scan once at startup, then once each day at the configured local time."""
+    """毎日の設定時刻にスキャンする（起動時スキャンはフロント側で実施）。"""
     from datetime import datetime, timedelta
 
-    time.sleep(2)
+    time.sleep(3)
     last_daily_scan_date = None
     try:
-        _run_scan_jobs("Startup scan")
         settings = db.get_settings()
         hour, minute = _parse_daily_scan_time(settings.get("daily_scan_time"))
         now = datetime.now()
         target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        # Startup already covered today if the scheduled time has passed.
+        # すでに設定時刻を過ぎて起動した場合は、起動時スキャンで本日分を賄ったとみなす
         if now >= target_today:
             last_daily_scan_date = now.date()
+            log.info(
+                "Skip daily scan for today (started after %02d:%02d; startup scan covers it)",
+                hour,
+                minute,
+            )
+        else:
+            log.info("Next daily scan today at %02d:%02d", hour, minute)
     except Exception:
-        log.exception("Startup scan failed")
+        log.exception("Scheduler init failed")
 
     while not _scheduler_stop.is_set():
         try:
@@ -133,7 +169,7 @@ def _scheduler_loop() -> None:
             target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
             if now >= target_today and last_daily_scan_date != today:
-                _run_scan_jobs("Daily scheduled scan")
+                _run_scan_jobs("毎日の自動スキャン")
                 last_daily_scan_date = today
 
             if last_daily_scan_date == today:
@@ -141,7 +177,7 @@ def _scheduler_loop() -> None:
             else:
                 next_target = target_today
             wait = (next_target - datetime.now()).total_seconds()
-            # Wake often so setting changes apply without restart.
+            # 設定変更を反映するため最大30秒で起床
             wait = min(30.0, max(1.0, wait if wait > 0 else 1.0))
         except Exception:
             log.exception("Scheduled scan failed")
