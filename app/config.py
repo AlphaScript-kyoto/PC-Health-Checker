@@ -23,7 +23,7 @@ def _data_dir() -> Path:
 
 
 APP_NAME = "PC Health"
-APP_VERSION = "0.2.4"
+APP_VERSION = "0.3.0"
 APP_AUTHOR = "Alpha Script"
 APP_HOMEPAGE = "https://alphascript-kyoto.github.io/as-homepage/"
 APP_CONTACT = ""

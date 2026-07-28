@@ -1,11 +1,23 @@
 # パソコンちぇっ君（Pasokon Chekkun）
 
+**バージョン 0.3.0**
+
 ディスクの健全性（SMART）・空き容量・容量マップ・買い替え提案・価格ウォッチ・ニュースをひとつのデスクトップアプリで見守ります。  
 旧称: PCの健康チェッカー  
 制作者: [Alpha Script](https://alphascript-kyoto.github.io/as-homepage/)  
 リポジトリ: https://github.com/AlphaScript-kyoto/PC-Health-Checker
 
 **アプリ内からのファイル削除や商品の自動購入は行いません。**
+
+## 0.3.0 の主な変更
+
+- ディスク詳細を CrystalDiskInfo 風の**別ウィンドウ**で表示（上段2列・温度は右上）
+- SMART から**総書込み量（ホスト）**、バッファサイズ（IDENTIFY／モデル公称値）を表示
+- HDD／SSD の回転数誤判定を修正
+- 健康バッジの**文言と色を一致**（通電年数などの「注意」を正しく表示）
+- 管理者起動でも最新 UI を取り込みやすく改善（再起動時の再ビルド／再読込）
+- **毎日の自動スキャン**結果を画面に反映（進捗・最終スキャン時刻・通知）
+- 開発用ランチャー（`run_app.vbs` / `run_app.bat`）を現行構成に合わせて修正
 
 ## 使い方
 
@@ -53,7 +65,7 @@ SMART を正確に取るには、画面の **管理者として再起動** を�
 **管理者として再起動**について:
 
 - まだ管理者でない → UI を `dist` に書き出してから管理者で開き直します
-- **すでに管理者** → 最新UIをビルドし直して画面を読み直します（「何も起きない」ことはありません）
+- **すでに管理者** → 最新UIをビルドし直して画面を読み直します
 - Vite に繋がるときは最新の開発サーバーを優先します
 
 うまく反映されないときは、トレイから一度「終了」して `run_app.vbs` → 管理者再起動、を試してください。
@@ -79,14 +91,11 @@ npm run release
 - `run_as_admin.bat` … 管理者起動用
 - `readme.txt` … 使い方
 
-**ZIP にするのは `release` フォルダです。**  
-（フォルダごと zip しても、中の3ファイルだけ zip してもどちらでもOK）
-
-中身の例:
+**ZIP にするのは次の3ファイルだけ**です（`.icon-ico` / `win-unpacked` / `builder-debug.yml` は入れない）。
 
 ```
 release/
-  PC-Chekkun-0.2.0-portable.exe
+  PC-Chekkun-0.3.0-portable.exe
   run_as_admin.bat
   readme.txt
 ```
@@ -97,6 +106,11 @@ release/
 
 | タブ | 内容 |
 |------|------|
+| ホーム | 総合ステータス、在庫、アラート。起動時＆「今すぐスキャン」で健康診断＋容量マップを**並行**実行 |
+| ディスク | CrystalDiskInfo 相当の識別情報。SMART 全項目は **詳細ウィンドウ**（上段2列・コンパクト）で確認 |
+| 容量マップ | ツリーマップ・安全性ラベル・削除候補 |
+| 提案 | 交換候補リンク（価格.com は SJIS エンコード） |
+| 価格 | 追跡・カタログ（複数列）。追跡カードに **自前の価格推移グラフ** と **Keepa 1年グラフ**（ASIN取得後）。AMD マザボに X870 / X870E あり |
 | ニュース | タブを開くたびに最新取得 |
 | 設定 | 通知・スタートアップ・閾値・**毎日の自動スキャン時刻**（アプリ常駐中に実行。画面も約10秒ごとに結果を取り込みます） |
 
@@ -111,7 +125,7 @@ release/
 - 対応機能（S.M.A.R.T. / 48bit LBA / APM / AAM / NCQ / TRIM など）
 - バッファサイズ / NVキャッシュ / 回転数  
   （バッファは SMART 属性ではなく ATA IDENTIFY の旧項目。取れないときはモデル公称値を補完し、`8192 KB（公称値）` と表示します）
-- 電源投入回数 / 使用時間
+- 総書込み量（ホスト） / 電源投入回数 / 使用時間
 - S.M.A.R.T. 属性テーブル（ID・項目名・現在値・最悪値・しきい値・生の値）
 
 ## 各ファイルの役割
@@ -121,6 +135,7 @@ release/
 | `electron/main.ts` | ウィンドウ・トレイ・管理者昇格・Python 起動 |
 | `electron/preload.ts` | 画面向け安全 API |
 | `src/` | React UI（全タブ） |
+| `src/components/DiskDetailView.tsx` | ディスク詳細（一覧カード／詳細ウィンドウ共通） |
 | `src/pages/PricesPage.tsx` | 価格追跡・カタログ UI |
 | `src/components/PriceCharts.tsx` | 価格推移グラフ / Keepa 埋め込み |
 | `assets/icon.png` / `build/icon.ico` | アプリアイコン（ウィンドウ・トレイ・配布用） |
@@ -130,6 +145,7 @@ release/
 | `release/` | **配布用の完成物（ここを ZIP する）** |
 | `backend/app/` | FastAPI・スキャン・DB・価格・ニュース |
 | `backend/app/scanner.py` | 健康診断と容量マップの並行スキャン・二重進捗 |
+| `backend/app/main.py` | API 起動・毎日自動スキャンのスケジューラ |
 | `backend/app/collectors/disks.py` | SMART / 識別情報の収集 |
 | `backend/app/space_scan.py` | 容量マップ用フォルダ走査 |
 | `requirements.txt` | Python 依存関係 |

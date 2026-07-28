@@ -1,6 +1,6 @@
 {
   "name": "pc-health-checker",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "パソコンちぇっ君 — ディスク健全性・容量マップ・買い替え提案",
   "main": "dist-electron/main.js",
   "private": true,

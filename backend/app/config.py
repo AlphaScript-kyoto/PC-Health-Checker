@@ -23,7 +23,7 @@ def _data_dir() -> Path:
 
 APP_NAME = "パソコンちぇっ君"
 APP_NAME_EN = "Pasokon Chekkun"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.3.0"
 APP_AUTHOR = "Alpha Script"
 APP_HOMEPAGE = "https://alphascript-kyoto.github.io/as-homepage/"
 APP_CONTACT = ""
