@@ -98,14 +98,18 @@ def collect_candidates(root: dict[str, Any], min_bytes: int = 50 * 1024 * 1024) 
 class SpaceScanState:
     cancelled: bool = False
     running: bool = False
+    paused: bool = False
+    root_path: str | None = None
     progress: dict[str, Any] | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
+    resume_event: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 _state = SpaceScanState()
 _results_by_root: dict[str, dict[str, Any]] = {}
+_scan_thread: threading.Thread | None = None
 
 
 def _normalize_root(root_path: str) -> str:
@@ -120,13 +124,54 @@ def get_progress() -> dict[str, Any] | None:
 def get_result(root_path: str | None = None) -> dict[str, Any] | None:
     with _state.lock:
         if root_path:
-            return _results_by_root.get(_normalize_root(root_path))
+            normalized = _normalize_root(root_path)
+            if _state.running and normalized == _normalize_root(_state.root_path or ""):
+                return None
+            return _results_by_root.get(normalized)
         return _state.result
 
 
 def cancel_scan() -> None:
     with _state.lock:
         _state.cancelled = True
+        _state.paused = False
+        _state.resume_event.set()
+
+
+def pause_scan() -> dict[str, Any]:
+    with _state.lock:
+        if not _state.running:
+            return {"ok": False, "message": "実行中のスキャンがありません"}
+        if _state.paused:
+            return {"ok": True, "paused": True}
+        _state.paused = True
+        _state.resume_event.clear()
+        if _state.progress:
+            _state.progress["phase"] = "paused"
+        return {"ok": True, "paused": True}
+
+
+def resume_scan() -> dict[str, Any]:
+    with _state.lock:
+        if not _state.running:
+            return {"ok": False, "message": "再開できるスキャンがありません"}
+        _state.paused = False
+        _state.resume_event.set()
+        if _state.progress:
+            _state.progress["phase"] = "scanning"
+        return {"ok": True, "paused": False}
+
+
+def _checkpoint() -> bool:
+    """中断中は待機し、キャンセルされたら True を返す。"""
+    while True:
+        with _state.lock:
+            if _state.cancelled:
+                return True
+            paused = _state.paused
+        if not paused:
+            return False
+        _state.resume_event.wait(0.2)
 
 
 def list_drives() -> list[dict[str, Any]]:
@@ -206,7 +251,7 @@ def _disk_usage(root_path: str) -> dict[str, int]:
 
 
 def _scan_dir(dir_path: str, depth: int, stats: dict[str, Any], emit: Callable[[], None]) -> dict[str, Any] | None:
-    if _state.cancelled:
+    if _checkpoint():
         return None
     try:
         entries = list(os.scandir(dir_path))
@@ -219,7 +264,7 @@ def _scan_dir(dir_path: str, depth: int, stats: dict[str, Any], emit: Callable[[
     size = 0
 
     for entry in entries:
-        if _state.cancelled:
+        if _checkpoint():
             break
         name = entry.name
         if name in SKIP_NAMES or (name.startswith("$") and name != "$Recycle.Bin"):
@@ -310,6 +355,7 @@ def _run_scan(root_path: str) -> None:
                 "scannedDirs": stats["scannedDirs"],
                 "currentPath": stats["currentPath"],
                 "bytesSeen": stats["bytesSeen"],
+                "phase": "paused" if _state.paused else "scanning",
             }
 
     try:
@@ -318,7 +364,9 @@ def _run_scan(root_path: str) -> None:
         if _state.cancelled:
             with _state.lock:
                 _state.running = False
-                _state.error = "CANCELLED"
+                _state.paused = False
+                _state.progress = None
+                _state.error = None
             return
         if not raw:
             raise RuntimeError(f"{root_path} を読み取れませんでした。")
@@ -338,31 +386,54 @@ def _run_scan(root_path: str) -> None:
             _results_by_root[_normalize_root(root_path)] = result
             _state.progress = None
             _state.running = False
+            _state.paused = False
             _state.error = None
     except Exception as exc:
         with _state.lock:
             _state.running = False
+            _state.paused = False
             _state.error = str(exc)
             _state.progress = None
 
 
 def start_scan(root_path: str) -> dict[str, Any]:
+    global _scan_thread
     with _state.lock:
         if _state.running:
             return {"ok": False, "message": "すでにスキャン中です"}
         _state.running = True
         _state.cancelled = False
+        _state.paused = False
+        _state.root_path = root_path
+        _state.resume_event.set()
         _state.error = None
         _state.result = None
+        _results_by_root.pop(_normalize_root(root_path), None)
         _state.progress = {
             "scannedFiles": 0,
             "scannedDirs": 0,
             "currentPath": root_path,
             "bytesSeen": 0,
+            "phase": "scanning",
         }
-    thread = threading.Thread(target=_run_scan, args=(root_path,), daemon=True)
-    thread.start()
+    _scan_thread = threading.Thread(target=_run_scan, args=(root_path,), daemon=True)
+    _scan_thread.start()
     return {"ok": True}
+
+
+def restart_scan(root_path: str) -> dict[str, Any]:
+    """実行中の走査を安全に止め、同じドライブを先頭から走査する。"""
+    with _state.lock:
+        thread = _scan_thread
+        running = _state.running
+    if running:
+        cancel_scan()
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+        with _state.lock:
+            if _state.running:
+                return {"ok": False, "message": "前のスキャンを停止しています。少し待ってから再度お試しください"}
+    return start_scan(root_path)
 
 
 def run_scan_blocking(root_path: str) -> dict[str, Any]:
@@ -372,15 +443,21 @@ def run_scan_blocking(root_path: str) -> dict[str, Any]:
             return {"ok": False, "message": "すでにスキャン中です"}
         _state.running = True
         _state.cancelled = False
+        _state.paused = False
+        _state.root_path = root_path
+        _state.resume_event.set()
         _state.error = None
         _state.progress = {
             "scannedFiles": 0,
             "scannedDirs": 0,
             "currentPath": root_path,
             "bytesSeen": 0,
+            "phase": "scanning",
         }
     _run_scan(root_path)
     with _state.lock:
+        if _state.cancelled:
+            return {"ok": False, "message": "CANCELLED"}
         if _state.error:
             return {"ok": False, "message": _state.error}
         return {"ok": True, "rootPath": root_path}

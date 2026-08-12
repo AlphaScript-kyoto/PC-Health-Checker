@@ -96,6 +96,27 @@ def api_scan() -> dict[str, Any]:
     return start_scan(notify_alerts=True)
 
 
+@app.post("/api/scan/pause")
+def api_scan_pause() -> dict[str, Any]:
+    from app.scanner import pause_scan
+
+    return pause_scan()
+
+
+@app.post("/api/scan/resume")
+def api_scan_resume() -> dict[str, Any]:
+    from app.scanner import resume_scan
+
+    return resume_scan()
+
+
+@app.post("/api/scan/restart")
+def api_scan_restart() -> dict[str, Any]:
+    from app.scanner import restart_scan
+
+    return restart_scan(notify_alerts=True)
+
+
 @app.get("/api/scan/progress")
 def api_scan_progress() -> dict[str, Any]:
     return get_scan_progress()
@@ -240,6 +261,30 @@ def api_space_scan(body: SpaceScanBody) -> dict[str, Any]:
     if not root:
         raise HTTPException(400, "rootPath required")
     return start_scan(root)
+
+
+@app.post("/api/space/pause")
+def api_space_pause() -> dict[str, Any]:
+    from app.space_scan import pause_scan
+
+    return pause_scan()
+
+
+@app.post("/api/space/resume")
+def api_space_resume() -> dict[str, Any]:
+    from app.space_scan import resume_scan
+
+    return resume_scan()
+
+
+@app.post("/api/space/restart")
+def api_space_restart(body: SpaceScanBody) -> dict[str, Any]:
+    from app.space_scan import restart_scan
+
+    root = body.rootPath.strip()
+    if not root:
+        raise HTTPException(400, "rootPath required")
+    return restart_scan(root)
 
 
 @app.get("/api/space/progress")

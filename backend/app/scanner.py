@@ -17,6 +17,13 @@ _scan_thread: threading.Thread | None = None
 _map_thread: threading.Thread | None = None
 _last_scan: dict[str, Any] | None = None
 _on_status_change: Callable[[str], None] | None = None
+_resume_event = threading.Event()
+_resume_event.set()
+_cancel_requested = False
+
+
+class ScanCancelled(Exception):
+    """再スキャンのために現在の処理が停止されたことを示す。"""
 
 _progress_lock = threading.Lock()
 _progress: dict[str, Any] = {
@@ -75,7 +82,10 @@ def _recompute_overall(*, finished_error: str | None = None) -> None:
     mapping_running = bool(mapping.get("running"))
     _progress["running"] = health_running or mapping_running
 
-    if health_running and mapping_running:
+    if _progress["running"] and not _resume_event.is_set():
+        _progress["phase"] = "paused"
+        _progress["message"] = "スキャンを中断しています"
+    elif health_running and mapping_running:
         _progress["phase"] = "parallel"
         _progress["message"] = "健康診断と容量マップを並行処理中…"
     elif health_running:
@@ -86,7 +96,11 @@ def _recompute_overall(*, finished_error: str | None = None) -> None:
         _progress["message"] = mapping.get("message") or "容量マップ作成中…"
     else:
         err = finished_error or health.get("error") or mapping.get("error")
-        if err:
+        if _cancel_requested:
+            _progress["phase"] = "cancelled"
+            _progress["message"] = "スキャンを停止しました"
+            _progress["error"] = None
+        elif err:
             _progress["phase"] = "error"
             _progress["message"] = "スキャンに失敗しました"
             _progress["error"] = err
@@ -96,6 +110,48 @@ def _recompute_overall(*, finished_error: str | None = None) -> None:
             _progress["error"] = None
             _progress["percent"] = 100
         _progress["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def _checkpoint() -> None:
+    while True:
+        if _cancel_requested:
+            raise ScanCancelled()
+        if _resume_event.wait(0.2):
+            return
+
+
+def pause_scan() -> dict[str, Any]:
+    with _progress_lock:
+        if not _progress.get("running"):
+            return {"ok": False, "message": "実行中のスキャンがありません"}
+        _resume_event.clear()
+        _progress["phase"] = "paused"
+        _progress["message"] = "スキャンを中断しています"
+    from app.space_scan import pause_scan as pause_space_scan
+
+    pause_space_scan()
+    return {"ok": True, "paused": True}
+
+
+def resume_scan() -> dict[str, Any]:
+    with _progress_lock:
+        if not _progress.get("running"):
+            return {"ok": False, "message": "再開できるスキャンがありません"}
+        _resume_event.set()
+        _recompute_overall()
+    from app.space_scan import resume_scan as resume_space_scan
+
+    resume_space_scan()
+    return {"ok": True, "paused": False}
+
+
+def cancel_scan() -> None:
+    global _cancel_requested
+    _cancel_requested = True
+    _resume_event.set()
+    from app.space_scan import cancel_scan as cancel_space_scan
+
+    cancel_space_scan()
 
 
 def _set_health_progress(
@@ -184,14 +240,18 @@ def _set_progress(
 
 
 def _collect_all_with_progress() -> dict[str, Any]:
+    _checkpoint()
     _set_health_progress(phase="inventory", percent=8, message="PC情報（CPU / メモリ / OS など）を取得中…")
     inventory = collect_inventory()
 
+    _checkpoint()
     _set_health_progress(phase="disks", percent=35, message="ディスク情報・SMART を取得中…")
     disks = collect_disks()
 
+    _checkpoint()
     _set_health_progress(phase="volumes", percent=60, message="ドライブの空き容量を確認中…")
     volumes = collect_volumes()
+    _checkpoint()
 
     elevated = is_elevated()
 
@@ -241,6 +301,7 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
             settings = db.get_settings()
             raw = _collect_all_with_progress()
 
+            _checkpoint()
             _set_health_progress(phase="evaluate", percent=75, message="リスク判定と提案を作成中…")
             changes = db.upsert_known_disks(raw.get("disks") or [])
             evaluated = evaluate(raw, settings)
@@ -280,6 +341,7 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
             }
 
             _set_health_progress(phase="save", percent=90, message="結果を保存中…")
+            _checkpoint()
             db.save_snapshot(evaluated["overall_status"], payload)
             db.save_disk_history(evaluated.get("disks") or [])
 
@@ -328,6 +390,13 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
                 finished=True,
             )
             return payload
+        except ScanCancelled:
+            _set_health_progress(
+                running=False,
+                phase="cancelled",
+                message="健康診断を停止しました",
+            )
+            return {}
         except Exception as exc:
             _set_health_progress(
                 phase="error",
@@ -348,6 +417,7 @@ def _run_space_maps() -> None:
         current_drive="",
     )
     try:
+        _checkpoint()
         drives = list_drives()
         if not drives:
             _set_mapping_progress(
@@ -358,6 +428,7 @@ def _run_space_maps() -> None:
             return
         total = len(drives)
         for index, drive in enumerate(drives):
+            _checkpoint()
             letter = drive.get("letter") or "?"
             root = drive.get("rootPath") or f"{letter}:\\"
             percent = 5 + int((index / max(total, 1)) * 90)
@@ -366,11 +437,19 @@ def _run_space_maps() -> None:
                 message=f"{letter}: のマッピングを作成中…（{index + 1}/{total}）",
                 current_drive=f"{letter}:",
             )
-            run_scan_blocking(root)
+            result = run_scan_blocking(root)
+            if not result.get("ok") and result.get("message") == "CANCELLED":
+                raise ScanCancelled()
+        _checkpoint()
         _set_mapping_progress(
             percent=100,
             message="容量マップの作成が完了しました",
             finished=True,
+        )
+    except ScanCancelled:
+        _set_mapping_progress(
+            running=False,
+            message="容量マップ作成を停止しました",
         )
     except Exception as exc:
         _set_mapping_progress(
@@ -383,10 +462,12 @@ def _run_space_maps() -> None:
 
 def start_scan(notify_alerts: bool = True) -> dict[str, Any]:
     """健康診断と容量マップを並行でバックグラウンド開始する。"""
-    global _scan_thread, _map_thread
+    global _scan_thread, _map_thread, _cancel_requested
     with _progress_lock:
         if _progress.get("running"):
             return {"ok": True, "started": False, "message": "already running"}
+        _cancel_requested = False
+        _resume_event.set()
         now = datetime.now(timezone.utc).isoformat()
         _progress["running"] = True
         _progress["phase"] = "queued"
@@ -427,3 +508,18 @@ def start_scan(notify_alerts: bool = True) -> dict[str, Any]:
     _scan_thread.start()
     _map_thread.start()
     return {"ok": True, "started": True, "parallel": True}
+
+
+def restart_scan(notify_alerts: bool = True) -> dict[str, Any]:
+    """現在の全体スキャンを止め、健康診断と容量マップを最初から開始する。"""
+    cancel_scan()
+    for thread in (_scan_thread, _map_thread):
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=15.0)
+    if any(thread and thread.is_alive() for thread in (_scan_thread, _map_thread)):
+        return {
+            "ok": False,
+            "started": False,
+            "message": "前のスキャンを停止しています。少し待ってから再度お試しください",
+        }
+    return start_scan(notify_alerts=notify_alerts)

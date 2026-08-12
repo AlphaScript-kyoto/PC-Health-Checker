@@ -4,6 +4,9 @@ import {
   getDrives,
   getSpaceProgress,
   getSpaceResult,
+  postSpacePause,
+  postSpaceRestart,
+  postSpaceResume,
   postSpaceScan,
 } from '../api'
 import { Treemap } from '../components/Treemap'
@@ -15,7 +18,7 @@ interface Props {
   showToast: (message: string) => void
 }
 
-type Phase = 'idle' | 'scanning' | 'done' | 'error' | 'unavailable'
+type Phase = 'idle' | 'scanning' | 'paused' | 'done' | 'error' | 'unavailable'
 
 function normalizeLetter(value: string | null | undefined): string {
   return String(value || '')
@@ -104,6 +107,41 @@ export function SpacePage({ initialDrive, showToast }: Props) {
     }
   }, [selectedDrive, apiMissing])
 
+  const beginPolling = (targetRoot: string) => {
+    stopPolling()
+    pollRef.current = window.setInterval(() => {
+      void (async () => {
+        try {
+          const prog = await getSpaceProgress()
+          if (prog) {
+            setProgress(prog)
+            if (prog.phase === 'paused') {
+              stopPolling()
+              setPhase('paused')
+              return
+            }
+          }
+
+          const done = await getSpaceResult(targetRoot)
+          if (done?.root) {
+            stopPolling()
+            setResult(done)
+            setSelected(done.root)
+            setPhase('done')
+            setProgress(null)
+            showToast('マッピングが完了しました')
+          }
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 404) return
+          stopPolling()
+          const message = err instanceof Error ? err.message : String(err)
+          setError(message)
+          setPhase('error')
+        }
+      })()
+    }, 800)
+  }
+
   const startScan = async () => {
     if (!selectedDrive || phase === 'scanning' || apiMissing) return
     setError(null)
@@ -120,7 +158,8 @@ export function SpacePage({ initialDrive, showToast }: Props) {
     showToast(`${selectedDrive.letter}:のマッピングを開始しました`)
 
     try {
-      await postSpaceScan(selectedDrive.rootPath)
+      const response = await postSpaceScan(selectedDrive.rootPath)
+      if (response.ok === false) throw new Error(response.message || 'スキャンを開始できませんでした')
     } catch (err) {
       stopPolling()
       if (err instanceof ApiError && (err.status === 404 || err.status === 501)) {
@@ -137,34 +176,68 @@ export function SpacePage({ initialDrive, showToast }: Props) {
       return
     }
 
-    const targetRoot = selectedDrive.rootPath
-    stopPolling()
-    pollRef.current = window.setInterval(() => {
-      void (async () => {
-        try {
-          const prog = await getSpaceProgress()
-          if (prog) setProgress(prog)
+    beginPolling(selectedDrive.rootPath)
+  }
 
-          const done = await getSpaceResult(targetRoot)
-          if (done && done.root) {
-            stopPolling()
-            setResult(done)
-            setSelected(done.root)
-            setPhase('done')
-            setProgress(null)
-            showToast('マッピングが完了しました')
-          }
-        } catch (err) {
-          if (err instanceof ApiError && err.status === 404) {
-            return
-          }
-          stopPolling()
-          const message = err instanceof Error ? err.message : String(err)
-          setError(message)
-          setPhase('error')
-        }
-      })()
-    }, 800)
+  const pauseScan = async () => {
+    if (phase !== 'scanning') return
+    try {
+      const response = await postSpacePause()
+      if (response.ok === false) throw new Error(response.message || 'スキャンを中断できませんでした')
+      stopPolling()
+      setPhase('paused')
+      setProgress((current) => (current ? { ...current, phase: 'paused' } : current))
+      showToast('スキャンを中断しました')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      showToast(`スキャンの中断に失敗: ${message}`)
+    }
+  }
+
+  const resumeScan = async () => {
+    if (!selectedDrive || phase !== 'paused') return
+    try {
+      const response = await postSpaceResume()
+      if (response.ok === false) throw new Error(response.message || 'スキャンを再開できませんでした')
+      setError(null)
+      setPhase('scanning')
+      setProgress((current) => (current ? { ...current, phase: 'scanning' } : current))
+      beginPolling(selectedDrive.rootPath)
+      showToast('スキャンを再開しました')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      showToast(`スキャンの再開に失敗: ${message}`)
+    }
+  }
+
+  const restartScan = async () => {
+    if (!selectedDrive || apiMissing) return
+    stopPolling()
+    setError(null)
+    setResult(null)
+    setSelected(null)
+    setPhase('scanning')
+    setProgress({
+      scannedFiles: 0,
+      scannedDirs: 0,
+      currentPath: selectedDrive.rootPath,
+      bytesSeen: 0,
+      percent: 0,
+      phase: 'scanning',
+    })
+    try {
+      const response = await postSpaceRestart(selectedDrive.rootPath)
+      if (response.ok === false) throw new Error(response.message || 'スキャンをやり直せませんでした')
+      beginPolling(selectedDrive.rootPath)
+      showToast(`${selectedDrive.letter}:を最初からスキャンしています`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setPhase('error')
+      showToast(`再スキャンの開始に失敗: ${message}`)
+    }
   }
 
   const openPath = async (targetPath: string) => {
@@ -219,7 +292,7 @@ export function SpacePage({ initialDrive, showToast }: Props) {
                       key={drive.letter}
                       type="button"
                       className={`drive-card ${active ? 'is-active' : ''}`}
-                      disabled={phase === 'scanning'}
+                      disabled={phase === 'scanning' || phase === 'paused'}
                       onClick={() => {
                         setSelectedDrive(drive)
                         if (result && result.rootPath !== drive.rootPath) {
@@ -241,15 +314,36 @@ export function SpacePage({ initialDrive, showToast }: Props) {
             )}
 
             <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                className="btn primary"
-                disabled={!selectedDrive || phase === 'scanning'}
-                onClick={() => void startScan()}
-              >
-                {phase === 'scanning' && <span className="btn-spinner" aria-hidden />}
-                {selectedDrive ? `${selectedDrive.letter}:のマッピングを作成` : 'マッピングを作成'}
-              </button>
+              {phase === 'idle' && (
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={!selectedDrive}
+                  onClick={() => void startScan()}
+                >
+                  {selectedDrive ? `${selectedDrive.letter}:のマッピングを作成` : 'マッピングを作成'}
+                </button>
+              )}
+              {phase === 'scanning' && (
+                <button type="button" className="btn danger" onClick={() => void pauseScan()}>
+                  スキャンを中断
+                </button>
+              )}
+              {phase === 'paused' && (
+                <button type="button" className="btn primary" onClick={() => void resumeScan()}>
+                  スキャンを再開
+                </button>
+              )}
+              {phase !== 'idle' && (
+                <button
+                  type="button"
+                  className="btn ghost"
+                  disabled={!selectedDrive}
+                  onClick={() => void restartScan()}
+                >
+                  最初からスキャン
+                </button>
+              )}
             </div>
 
             {(selectedDrive || result) && (
@@ -272,6 +366,14 @@ export function SpacePage({ initialDrive, showToast }: Props) {
             {phase === 'scanning' && progress && (
               <p className="muted" style={{ marginTop: 10 }}>
                 スキャン中… ファイル {progress.scannedFiles.toLocaleString('ja-JP')} / フォルダ{' '}
+                {progress.scannedDirs.toLocaleString('ja-JP')}
+                {progress.currentPath ? ` / ${progress.currentPath}` : ''}
+              </p>
+            )}
+
+            {phase === 'paused' && progress && (
+              <p className="muted" style={{ marginTop: 10 }}>
+                中断中 — ファイル {progress.scannedFiles.toLocaleString('ja-JP')} / フォルダ{' '}
                 {progress.scannedDirs.toLocaleString('ja-JP')}
                 {progress.currentPath ? ` / ${progress.currentPath}` : ''}
               </p>

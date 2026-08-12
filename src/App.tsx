@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getAbout, getScanProgress, getStatus, postScan } from './api'
+import {
+  getAbout,
+  getScanProgress,
+  getStatus,
+  postScan,
+  postScanPause,
+  postScanRestart,
+  postScanResume,
+} from './api'
 import { PageErrorBoundary } from './components/PageErrorBoundary'
 import { Toast } from './components/Toast'
 import { DisksPage } from './pages/DisksPage'
@@ -35,6 +43,7 @@ export default function App() {
   const autoScanStarted = useRef(false)
   const lastSeenScanAt = useRef<string | null>(null)
   const watchingBackground = useRef(false)
+  const scanSession = useRef(0)
 
   const showToast = useCallback((message: string) => {
     setToast(message)
@@ -85,8 +94,40 @@ export default function App() {
     return () => window.removeEventListener('focus', refreshAdmin)
   }, [refreshKey, refreshLastScan])
 
+  const monitorScan = useCallback(
+    async (session: number) => {
+      try {
+        for (;;) {
+          await new Promise((r) => window.setTimeout(r, 400))
+          if (session !== scanSession.current) return
+          const progress = await getScanProgress()
+          if (session !== scanSession.current) return
+          setScanProgress(progress)
+          if (!progress.running) {
+            if (progress.error) {
+              showToast(`スキャンに失敗しました: ${progress.error}`)
+            } else if (progress.phase !== 'cancelled') {
+              setRefreshKey((k) => k + 1)
+              await refreshLastScan()
+              showToast('スキャンが完了しました')
+            }
+            break
+          }
+        }
+      } finally {
+        if (session !== scanSession.current) return
+        setScanning(false)
+        window.setTimeout(() => {
+          setScanProgress((current) => (current?.running ? current : null))
+        }, 1800)
+      }
+    },
+    [refreshLastScan, showToast],
+  )
+
   const runScan = useCallback(async () => {
     if (scanning) return
+    const session = ++scanSession.current
     setScanning(true)
     setScanProgress({
       running: true,
@@ -96,25 +137,14 @@ export default function App() {
     })
     showToast('スキャンを開始しました…')
     try {
-      await postScan()
-      for (;;) {
-        await new Promise((r) => window.setTimeout(r, 400))
-        const progress = await getScanProgress()
-        setScanProgress(progress)
-        if (!progress.running) {
-          if (progress.error) {
-            showToast(`スキャンに失敗しました: ${progress.error}`)
-          } else {
-            setRefreshKey((k) => k + 1)
-            await refreshLastScan()
-            showToast('スキャンが完了しました')
-          }
-          break
-        }
-      }
+      const response = await postScan()
+      if (response.ok === false) throw new Error(response.message || 'スキャンを開始できませんでした')
+      await monitorScan(session)
     } catch (err) {
+      if (session !== scanSession.current) return
       const message = err instanceof Error ? err.message : String(err)
       showToast(`スキャンに失敗しました: ${message}`)
+      setScanning(false)
       setScanProgress({
         running: false,
         phase: 'error',
@@ -122,13 +152,63 @@ export default function App() {
         message: 'スキャンに失敗しました',
         error: message,
       })
-    } finally {
-      setScanning(false)
-      window.setTimeout(() => {
-        setScanProgress((current) => (current?.running ? current : null))
-      }, 1800)
     }
-  }, [scanning, showToast, refreshLastScan])
+  }, [monitorScan, scanning, showToast])
+
+  const pauseScan = useCallback(async () => {
+    try {
+      const response = await postScanPause()
+      if (response.ok === false) throw new Error(response.message || 'スキャンを中断できませんでした')
+      const progress = await getScanProgress()
+      setScanProgress(progress)
+      showToast('スキャンを中断しました')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      showToast(`スキャンの中断に失敗: ${message}`)
+    }
+  }, [showToast])
+
+  const resumeScan = useCallback(async () => {
+    try {
+      const response = await postScanResume()
+      if (response.ok === false) throw new Error(response.message || 'スキャンを再開できませんでした')
+      const progress = await getScanProgress()
+      setScanProgress(progress)
+      showToast('スキャンを再開しました')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      showToast(`スキャンの再開に失敗: ${message}`)
+    }
+  }, [showToast])
+
+  const restartScan = useCallback(async () => {
+    const session = ++scanSession.current
+    setScanning(true)
+    setScanProgress({
+      running: true,
+      phase: 'queued',
+      percent: 1,
+      message: '前の処理を停止して、最初から準備中…',
+    })
+    try {
+      const response = await postScanRestart()
+      if (response.ok === false) throw new Error(response.message || 'スキャンをやり直せませんでした')
+      showToast('最初からスキャンを開始しました')
+      await monitorScan(session)
+    } catch (err) {
+      if (session !== scanSession.current) return
+      const message = err instanceof Error ? err.message : String(err)
+      setScanning(false)
+      setScanProgress({
+        running: false,
+        phase: 'error',
+        percent: 0,
+        message: '再スキャンを開始できませんでした',
+        error: message,
+      })
+      showToast(`再スキャンの開始に失敗: ${message}`)
+    }
+  }, [monitorScan, showToast])
 
   // 起動時は必ず健康診断スキャンを実行
   useEffect(() => {
@@ -151,16 +231,17 @@ export default function App() {
         if (cancelled) return
 
         if (progress.running) {
+          const session = ++scanSession.current
           watchingBackground.current = true
           setScanning(true)
           setScanProgress(progress)
           showToast('自動スキャンを検知しました…')
           try {
             for (;;) {
-              if (cancelled) break
+              if (cancelled || session !== scanSession.current) break
               await new Promise((r) => window.setTimeout(r, 500))
               const next = await getScanProgress()
-              if (cancelled) break
+              if (cancelled || session !== scanSession.current) break
               setScanProgress(next)
               if (!next.running) {
                 if (next.error) {
@@ -176,10 +257,12 @@ export default function App() {
             }
           } finally {
             watchingBackground.current = false
-            setScanning(false)
-            window.setTimeout(() => {
-              setScanProgress((current) => (current?.running ? current : null))
-            }, 1800)
+            if (session === scanSession.current) {
+              setScanning(false)
+              window.setTimeout(() => {
+                setScanProgress((current) => (current?.running ? current : null))
+              }, 1800)
+            }
           }
           return
         }
@@ -291,17 +374,24 @@ export default function App() {
               </button>
             )}
             <div className="scan-action">
-              <button
-                type="button"
-                className={`btn primary ${scanning ? 'is-busy' : ''}`}
-                onClick={() => void runScan()}
-                disabled={scanning}
-              >
-                {scanning && <span className="btn-spinner" aria-hidden />}
-                {scanning
-                  ? `スキャン中 ${Math.round(scanProgress?.percent ?? 0)}%`
-                  : '今すぐスキャン'}
-              </button>
+              {!scanning ? (
+                <button type="button" className="btn primary" onClick={() => void runScan()}>
+                  今すぐスキャン
+                </button>
+              ) : scanProgress?.phase === 'paused' ? (
+                <button type="button" className="btn primary" onClick={() => void resumeScan()}>
+                  スキャンを再開
+                </button>
+              ) : (
+                <button type="button" className="btn danger" onClick={() => void pauseScan()}>
+                  スキャンを中断
+                </button>
+              )}
+              {scanning && (
+                <button type="button" className="btn ghost" onClick={() => void restartScan()}>
+                  最初からスキャン
+                </button>
+              )}
               <p className="scan-last">
                 {lastScannedAt
                   ? `最終スキャン: ${new Date(lastScannedAt).toLocaleString('ja-JP')}`
@@ -317,7 +407,13 @@ export default function App() {
           >
             <div className="scan-banner-head">
               <strong>
-                {scanning ? '並行スキャン実行中' : scanProgress.error ? 'スキャン失敗' : 'スキャン完了'}
+                {scanProgress.phase === 'paused'
+                  ? 'スキャン中断中'
+                  : scanning
+                    ? '並行スキャン実行中'
+                    : scanProgress.error
+                      ? 'スキャン失敗'
+                      : 'スキャン完了'}
               </strong>
               <span className="scan-banner-overall">
                 全体 {Math.round(scanProgress.percent ?? 0)}%

@@ -71,6 +71,18 @@ export async function postScan() {
   return api.post<{ ok?: boolean; started?: boolean; message?: string }>('/api/scan')
 }
 
+export async function postScanPause() {
+  return api.post<{ ok?: boolean; paused?: boolean; message?: string }>('/api/scan/pause')
+}
+
+export async function postScanResume() {
+  return api.post<{ ok?: boolean; paused?: boolean; message?: string }>('/api/scan/resume')
+}
+
+export async function postScanRestart() {
+  return api.post<{ ok?: boolean; started?: boolean; message?: string }>('/api/scan/restart')
+}
+
 export async function getScanProgress() {
   return api.get<import('./types').ScanProgressInfo>('/api/scan/progress')
 }
@@ -120,6 +132,18 @@ export async function getDrives() {
 
 export async function postSpaceScan(rootPath: string) {
   return api.post<{ ok?: boolean; message?: string }>('/api/space/scan', { rootPath })
+}
+
+export async function postSpacePause() {
+  return api.post<{ ok?: boolean; paused?: boolean; message?: string }>('/api/space/pause')
+}
+
+export async function postSpaceResume() {
+  return api.post<{ ok?: boolean; paused?: boolean; message?: string }>('/api/space/resume')
+}
+
+export async function postSpaceRestart(rootPath: string) {
+  return api.post<{ ok?: boolean; message?: string }>('/api/space/restart', { rootPath })
 }
 
 export async function getSpaceProgress() {
