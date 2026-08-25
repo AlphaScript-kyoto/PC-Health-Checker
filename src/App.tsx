@@ -410,7 +410,7 @@ export default function App() {
                 {scanProgress.phase === 'paused'
                   ? 'スキャン中断中'
                   : scanning
-                    ? '並行スキャン実行中'
+                    ? 'スキャン実行中'
                     : scanProgress.error
                       ? 'スキャン失敗'
                       : 'スキャン完了'}

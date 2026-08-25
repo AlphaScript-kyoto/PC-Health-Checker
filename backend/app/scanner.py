@@ -87,7 +87,7 @@ def _recompute_overall(*, finished_error: str | None = None) -> None:
         _progress["message"] = "スキャンを中断しています"
     elif health_running and mapping_running:
         _progress["phase"] = "parallel"
-        _progress["message"] = "健康診断と容量マップを並行処理中…"
+        _progress["message"] = "健康診断と容量マップを処理中…"
     elif health_running:
         _progress["phase"] = health.get("phase") or "health"
         _progress["message"] = health.get("message") or "健康診断中…"
@@ -378,10 +378,13 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
                     pass
 
             if include_maps:
-                try:
-                    _run_space_maps()
-                except Exception as map_exc:
-                    print("space map after health failed", map_exc)
+                # 健康診断を先に完了扱いにする前に、マップ側を running にして
+                # 全体進捗が一瞬「完了」に落ちないようにする
+                _set_mapping_progress(
+                    running=True,
+                    percent=1,
+                    message="容量マップを開始します…",
+                )
 
             _set_health_progress(
                 phase="done",
@@ -389,6 +392,13 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
                 message="健康診断が完了しました",
                 finished=True,
             )
+
+            if include_maps:
+                try:
+                    _run_space_maps()
+                except Exception as map_exc:
+                    print("space map after health failed", map_exc)
+
             return payload
         except ScanCancelled:
             _set_health_progress(
@@ -450,23 +460,22 @@ def _run_space_maps() -> None:
             ) -> None:
                 """ドライブ内の走査量からマッピング進捗%を更新する。"""
                 bytes_seen = max(0, int(snapshot.get("bytesSeen") or 0))
+                files = max(0, int(snapshot.get("scannedFiles") or 0))
+                dirs = max(0, int(snapshot.get("scannedDirs") or 0))
                 current = str(snapshot.get("currentPath") or "")
-                if _used > 0:
-                    # スキップ領域があるので 100% 手前までに留め、完了時に span_end へ
-                    frac = min(0.97, bytes_seen / _used)
-                else:
-                    # 使用量が不明なときはファイル数ベースのゆるい推定
-                    files = max(0, int(snapshot.get("scannedFiles") or 0))
-                    frac = min(0.97, files / 8000.0)
+                # バイト進捗 + ファイル/フォルダ数（スキップ領域や小ファイルだらけでもバーが動く）
+                byte_frac = (bytes_seen / _used) if _used > 0 else 0.0
+                activity_frac = min(0.95, files / 40_000 + dirs / 8_000)
+                frac = min(0.97, max(byte_frac, activity_frac))
                 percent = _start + int((_end - _start) * frac)
-                # パスが長いとUIが騒がしいので末尾を優先表示
                 short = current
-                if len(short) > 64:
-                    short = "…" + short[-63:]
+                if len(short) > 52:
+                    short = "…" + short[-51:]
                 _set_mapping_progress(
                     percent=percent,
                     message=(
-                        f"{_letter}: をスキャン中…（{_index + 1}/{_total}）"
+                        f"{_letter}: スキャン中（{_index + 1}/{_total}）"
+                        f"  {files:,}ファイル / {dirs:,}フォルダ"
                         + (f"  {short}" if short else "")
                     ),
                     current_drive=f"{_letter}:",
@@ -478,8 +487,11 @@ def _run_space_maps() -> None:
                 current_drive=f"{letter}:",
             )
             result = run_scan_blocking(root, on_progress=_on_drive_progress)
-            if not result.get("ok") and result.get("message") == "CANCELLED":
-                raise ScanCancelled()
+            if not result.get("ok"):
+                msg = str(result.get("message") or "")
+                if msg == "CANCELLED":
+                    raise ScanCancelled()
+                raise RuntimeError(msg or f"{letter}: のマッピングに失敗しました")
             # ドライブ完了時点でレンジ終端まで進める
             _set_mapping_progress(
                 percent=span_end,
@@ -507,7 +519,7 @@ def _run_space_maps() -> None:
 
 
 def start_scan(notify_alerts: bool = True) -> dict[str, Any]:
-    """健康診断と容量マップを並行でバックグラウンド開始する。"""
+    """健康診断のあと容量マップを順に実行する（HDD での同時アクセス競合を避ける）。"""
     global _scan_thread, _map_thread, _cancel_requested
     with _progress_lock:
         if _progress.get("running"):
@@ -529,31 +541,36 @@ def start_scan(notify_alerts: bool = True) -> dict[str, Any]:
             "error": None,
             "phase": "queued",
         }
+        # マップは健康診断完了後に開始（running=False のまま待機メッセージを出す）
         _progress["mapping"] = {
-            "running": True,
-            "percent": 1,
-            "message": "容量マップを準備中…",
+            "running": False,
+            "percent": 0,
+            "message": "健康診断の完了後に開始します…",
             "error": None,
             "current_drive": None,
         }
 
-    def _health_worker() -> None:
+    def _worker() -> None:
+        # 1本の HDD で SMART 取得と全ファイル走査を同時にやるとヘッドが往復し、
+        # ほぼ空でも何時間もかかる／進捗が止まったように見えることがある。
         try:
-            run_scan(notify_alerts=notify_alerts, include_maps=False)
+            run_scan(notify_alerts=notify_alerts, include_maps=True)
         except Exception:
             pass
+        finally:
+            with _progress_lock:
+                mapping = _progress["mapping"]
+                if not mapping.get("running") and int(mapping.get("percent") or 0) == 0:
+                    if _cancel_requested:
+                        mapping["message"] = "容量マップ作成を停止しました"
+                    elif _progress["health"].get("error"):
+                        mapping["message"] = "健康診断エラーのため容量マップは開始しませんでした"
+                    _recompute_overall()
 
-    def _map_worker() -> None:
-        try:
-            _run_space_maps()
-        except Exception:
-            pass
-
-    _scan_thread = threading.Thread(target=_health_worker, name="pchc-health-scan", daemon=True)
-    _map_thread = threading.Thread(target=_map_worker, name="pchc-space-maps", daemon=True)
+    _map_thread = None
+    _scan_thread = threading.Thread(target=_worker, name="pchc-full-scan", daemon=True)
     _scan_thread.start()
-    _map_thread.start()
-    return {"ok": True, "started": True, "parallel": True}
+    return {"ok": True, "started": True, "parallel": False}
 
 
 def restart_scan(notify_alerts: bool = True) -> dict[str, Any]:

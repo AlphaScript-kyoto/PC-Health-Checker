@@ -12,6 +12,11 @@ from typing import Any, Callable
 
 Safety = str  # safe | caution | danger | neutral
 
+# Windows: ジャンクション / マウントポイント / クラウドプレースホルダ
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000
+_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+
 SKIP_NAMES = {
     "System Volume Information",
     "Documents and Settings",
@@ -26,6 +31,12 @@ SKIP_NAMES = {
     "SendTo",
     "Templates",
     "Start Menu",
+}
+
+# 容量マップの実用上、再帰すると極端に遅い／ループしやすい場所
+SKIP_SCAN_NAMES = {
+    "WinSxS",  # ハードリンクだらけで HDD だと何時間もかかることがある
+    "CSC",  # オフラインファイルキャッシュ
 }
 
 RULES: list[tuple[re.Pattern[str], Safety, str, bool]] = [
@@ -250,11 +261,74 @@ def _disk_usage(root_path: str) -> dict[str, int]:
     return {"totalBytes": total, "freeBytes": free, "usedBytes": max(0, total - free)}
 
 
+def _dir_size_shallow(dir_path: str) -> int:
+    """再帰せず、直下のファイルサイズ合計だけ返す。"""
+    total = 0
+    try:
+        with os.scandir(dir_path) as it:
+            for entry in it:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    return total
+
+
+def _dir_size_depth1(dir_path: str) -> int:
+    """直下ファイル + その1段下のファイルまで（WinSxS などの概算用）。"""
+    total = _dir_size_shallow(dir_path)
+    try:
+        with os.scandir(dir_path) as it:
+            for entry in it:
+                try:
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        total += _dir_size_shallow(entry.path)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
+
+
+def _is_skipped_entry(entry: os.DirEntry) -> bool:
+    """シンボリックリンク・ジャンクション・クラウド想起ファイルなどは走査しない。"""
+    name = entry.name
+    if name in SKIP_NAMES:
+        return True
+    if name.startswith("$") and name != "$Recycle.Bin":
+        return True
+    try:
+        if entry.is_symlink():
+            return True
+    except OSError:
+        return True
+    try:
+        st = entry.stat(follow_symlinks=False)
+    except OSError:
+        return True
+    attrs = int(getattr(st, "st_file_attributes", 0) or 0)
+    if attrs & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return True
+    # OneDrive などのプレースホルダを触るとダウンロード待ちで止まることがある
+    if attrs & (_FILE_ATTRIBUTE_RECALL_ON_OPEN | _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS):
+        return True
+    return False
+
+
 def _scan_dir(dir_path: str, depth: int, stats: dict[str, Any], emit: Callable[[], None]) -> dict[str, Any] | None:
     if _checkpoint():
         return None
+
+    stats["currentPath"] = dir_path
+    emit()
+
     try:
-        entries = list(os.scandir(dir_path))
+        entry_iter = os.scandir(dir_path)
     except OSError:
         stats["skippedCount"] += 1
         return None
@@ -263,41 +337,71 @@ def _scan_dir(dir_path: str, depth: int, stats: dict[str, Any], emit: Callable[[
     children: list[dict[str, Any]] = []
     size = 0
 
-    for entry in entries:
-        if _checkpoint():
-            break
-        name = entry.name
-        if name in SKIP_NAMES or (name.startswith("$") and name != "$Recycle.Bin"):
-            stats["skippedCount"] += 1
-            continue
-        full = os.path.join(dir_path, name)
-        try:
-            if entry.is_symlink():
+    try:
+        for entry in entry_iter:
+            if _checkpoint():
+                break
+            full = os.path.join(dir_path, entry.name)
+
+            # WinSxS などは中身を全部辿らず、浅い概算サイズだけ載せる
+            if entry.name in SKIP_SCAN_NAMES:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stats["currentPath"] = full
+                        emit()
+                        approx = _dir_size_depth1(full)
+                        children.append(
+                            {
+                                "name": entry.name,
+                                "path": full,
+                                "size": approx,
+                                "safety": "danger",
+                                "reason": "巨大なシステム領域のため詳細走査を省略しています（概算）。",
+                                "children": None,
+                            }
+                        )
+                        size += approx
+                        stats["bytesSeen"] += approx
+                        stats["skippedCount"] += 1
+                except OSError:
+                    stats["skippedCount"] += 1
+                stats["ops"] += 1
+                emit()
+                continue
+
+            if _is_skipped_entry(entry):
                 stats["skippedCount"] += 1
                 continue
-            is_dir = entry.is_dir(follow_symlinks=False)
-            is_file = entry.is_file(follow_symlinks=False)
-        except OSError:
-            stats["skippedCount"] += 1
-            continue
 
-        if is_dir:
-            child = _scan_dir(full, depth + 1, stats, emit)
-            if child:
-                children.append(child)
-                size += int(child["size"])
-        elif is_file:
             try:
-                st = entry.stat(follow_symlinks=False)
-                size += st.st_size
-                stats["bytesSeen"] += st.st_size
-                stats["scannedFiles"] += 1
+                is_dir = entry.is_dir(follow_symlinks=False)
+                is_file = entry.is_file(follow_symlinks=False)
             except OSError:
                 stats["skippedCount"] += 1
-        stats["ops"] += 1
-        if stats["ops"] % 120 == 0:
-            stats["currentPath"] = full
-            emit()
+                continue
+
+            if is_dir:
+                child = _scan_dir(full, depth + 1, stats, emit)
+                if child:
+                    children.append(child)
+                    size += int(child["size"])
+            elif is_file:
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                    size += st.st_size
+                    stats["bytesSeen"] += st.st_size
+                    stats["scannedFiles"] += 1
+                except OSError:
+                    stats["skippedCount"] += 1
+            stats["ops"] += 1
+            if stats["ops"] % 40 == 0:
+                stats["currentPath"] = full
+                emit()
+    finally:
+        try:
+            entry_iter.close()
+        except Exception:
+            pass
 
     children.sort(key=lambda c: int(c["size"]), reverse=True)
     max_children = 40 if depth == 0 else 18
@@ -368,6 +472,19 @@ def _run_scan(
             except Exception:
                 pass
 
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat() -> None:
+        # scandir が長いときも「生きている」ことと現在パスを UI に流す
+        while not heartbeat_stop.wait(2.0):
+            with _state.lock:
+                if not _state.running or _state.cancelled:
+                    return
+            emit(True)
+
+    heartbeat = threading.Thread(target=_heartbeat, name="pchc-space-heartbeat", daemon=True)
+    heartbeat.start()
+
     try:
         emit(True)
         raw = _scan_dir(root_path, 0, stats, emit)
@@ -404,6 +521,9 @@ def _run_scan(
             _state.paused = False
             _state.error = str(exc)
             _state.progress = None
+    finally:
+        heartbeat_stop.set()
+        heartbeat.join(timeout=1.0)
 
 
 def start_scan(root_path: str) -> dict[str, Any]:
