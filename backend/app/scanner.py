@@ -431,15 +431,61 @@ def _run_space_maps() -> None:
             _checkpoint()
             letter = drive.get("letter") or "?"
             root = drive.get("rootPath") or f"{letter}:\\"
-            percent = 5 + int((index / max(total, 1)) * 90)
+            used_bytes = max(0, int(drive.get("usedBytes") or 0))
+            # このドライブが担当する進捗レンジ（例: 1本なら 5〜95）
+            span_start = 5 + int((index / max(total, 1)) * 90)
+            span_end = 5 + int(((index + 1) / max(total, 1)) * 90)
+            if span_end <= span_start:
+                span_end = min(95, span_start + 1)
+
+            def _on_drive_progress(
+                snapshot: dict[str, Any],
+                *,
+                _letter: str = letter,
+                _index: int = index,
+                _total: int = total,
+                _used: int = used_bytes,
+                _start: int = span_start,
+                _end: int = span_end,
+            ) -> None:
+                """ドライブ内の走査量からマッピング進捗%を更新する。"""
+                bytes_seen = max(0, int(snapshot.get("bytesSeen") or 0))
+                current = str(snapshot.get("currentPath") or "")
+                if _used > 0:
+                    # スキップ領域があるので 100% 手前までに留め、完了時に span_end へ
+                    frac = min(0.97, bytes_seen / _used)
+                else:
+                    # 使用量が不明なときはファイル数ベースのゆるい推定
+                    files = max(0, int(snapshot.get("scannedFiles") or 0))
+                    frac = min(0.97, files / 8000.0)
+                percent = _start + int((_end - _start) * frac)
+                # パスが長いとUIが騒がしいので末尾を優先表示
+                short = current
+                if len(short) > 64:
+                    short = "…" + short[-63:]
+                _set_mapping_progress(
+                    percent=percent,
+                    message=(
+                        f"{_letter}: をスキャン中…（{_index + 1}/{_total}）"
+                        + (f"  {short}" if short else "")
+                    ),
+                    current_drive=f"{_letter}:",
+                )
+
             _set_mapping_progress(
-                percent=percent,
+                percent=span_start,
                 message=f"{letter}: のマッピングを作成中…（{index + 1}/{total}）",
                 current_drive=f"{letter}:",
             )
-            result = run_scan_blocking(root)
+            result = run_scan_blocking(root, on_progress=_on_drive_progress)
             if not result.get("ok") and result.get("message") == "CANCELLED":
                 raise ScanCancelled()
+            # ドライブ完了時点でレンジ終端まで進める
+            _set_mapping_progress(
+                percent=span_end,
+                message=f"{letter}: のマッピングが完了（{index + 1}/{total}）",
+                current_drive=f"{letter}:",
+            )
         _checkpoint()
         _set_mapping_progress(
             percent=100,

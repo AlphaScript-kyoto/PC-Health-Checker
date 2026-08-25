@@ -331,7 +331,10 @@ def _scan_dir(dir_path: str, depth: int, stats: dict[str, Any], emit: Callable[[
     }
 
 
-def _run_scan(root_path: str) -> None:
+def _run_scan(
+    root_path: str,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+) -> None:
     started = time.time()
     stats = {
         "scannedFiles": 0,
@@ -350,13 +353,20 @@ def _run_scan(root_path: str) -> None:
             return
         last_emit = now
         with _state.lock:
-            _state.progress = {
+            snapshot = {
                 "scannedFiles": stats["scannedFiles"],
                 "scannedDirs": stats["scannedDirs"],
                 "currentPath": stats["currentPath"],
                 "bytesSeen": stats["bytesSeen"],
                 "phase": "paused" if _state.paused else "scanning",
             }
+            _state.progress = dict(snapshot)
+        # ロック外で通知（呼び出し側が別ロックを取る場合のデッドロック回避）
+        if on_progress is not None:
+            try:
+                on_progress(snapshot)
+            except Exception:
+                pass
 
     try:
         emit(True)
@@ -436,7 +446,10 @@ def restart_scan(root_path: str) -> dict[str, Any]:
     return start_scan(root_path)
 
 
-def run_scan_blocking(root_path: str) -> dict[str, Any]:
+def run_scan_blocking(
+    root_path: str,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     """健康診断スキャンから同期的に1ドライブ分のマップを作る。"""
     with _state.lock:
         if _state.running:
@@ -454,7 +467,7 @@ def run_scan_blocking(root_path: str) -> dict[str, Any]:
             "bytesSeen": 0,
             "phase": "scanning",
         }
-    _run_scan(root_path)
+    _run_scan(root_path, on_progress=on_progress)
     with _state.lock:
         if _state.cancelled:
             return {"ok": False, "message": "CANCELLED"}
