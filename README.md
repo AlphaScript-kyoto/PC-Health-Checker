@@ -9,6 +9,8 @@
 
 **アプリ内からのファイル削除や商品の自動購入は行いません。**
 
+詳細な機能要件・判定条件・API・データ構造は、[`SPECIFICATION.md`](SPECIFICATION.md) を参照してください。
+
 ## 0.3.0 の主な変更
 
 - ディスク詳細を CrystalDiskInfo 風の**別ウィンドウ**で表示（上段2列・温度は右上）
@@ -137,6 +139,7 @@ release/
 
 | パス | 役割 |
 |------|------|
+| `SPECIFICATION.md` | 画面・機能・判定基準・API・データ保存・運用をまとめた詳細仕様書 |
 | `electron/main.ts` | ウィンドウ・トレイ・管理者昇格・Python 起動 |
 | `electron/preload.ts` | 画面向け安全 API |
 | `src/` | React UI（全タブ） |
