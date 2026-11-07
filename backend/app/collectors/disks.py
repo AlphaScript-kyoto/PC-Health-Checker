@@ -76,28 +76,50 @@ ATTR_LABELS_JA: dict[str, str] = {
 }
 
 
-def _run_ps(script: str) -> Any:
-    result = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            script,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=90,
-        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-    )
+class PowerShellFailed(RuntimeError):
+    """PowerShell の実行や応答の読み取りに失敗した。"""
+
+
+class DiskCollectionError(RuntimeError):
+    """物理ディスク一覧を取得できなかった。正常とは区別する。"""
+
+
+def _run_ps(script: str, *, required: bool = False) -> Any:
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=90,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if required:
+            raise PowerShellFailed("PowerShellの実行に失敗しました") from exc
+        return []
+
     out = (result.stdout or "").strip()
+    err = (result.stderr or "").strip()
+    if required and result.returncode != 0:
+        raise PowerShellFailed("PowerShellから情報を取得できませんでした")
     if not out:
+        # 終了コード 0 でエラー出力も無いときは、対象が無いだけとみなす
+        if required and err:
+            raise PowerShellFailed("PowerShellから情報を取得できませんでした")
         return []
     try:
         return json.loads(out)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        if required:
+            raise PowerShellFailed("PowerShellの応答を読み取れませんでした") from exc
         return []
 
 
@@ -1061,12 +1083,21 @@ $out | ConvertTo-Json -Compress -Depth 6
         # InstanceName often contains model-ish path; keep raw list for matching later
         table = _parse_wmi_vendor_specific(vendor)
         attrs = {r["name"]: r["raw"] for r in table if r.get("name")}
+        predict = row.get("PredictFailure")
+        if predict is True:
+            wmi_overall = "FAILED"
+        elif predict is False and table:
+            wmi_overall = "PASSED"
+        else:
+            # 失敗予測が無い、または属性が空のときは合格にしない
+            wmi_overall = "UNKNOWN"
         smart: dict[str, Any] = {
             "source": "wmi",
             "instance_name": instance,
             "attributes": attrs,
             "attribute_table": table,
-            "overall": "FAILED" if row.get("PredictFailure") else "PASSED",
+            "overall": wmi_overall,
+            "smart_status": wmi_overall,
             "note": "WMI SMART（管理者権限で取得）。smartctl の方が詳細です。",
         }
         for r in table:
@@ -1165,8 +1196,9 @@ def _flag_critical_raw(smart: dict[str, Any]) -> dict[str, Any]:
                 pass
     if caution and smart.get("health_meter") in (None, "Good", "Unknown"):
         smart["health_meter"] = "Caution"
-        if (smart.get("overall") or "").upper() == "PASSED":
+        if (smart.get("overall") or "").upper() in ("PASSED", "UNKNOWN", ""):
             smart["overall"] = "CAUTION"
+            smart["smart_status"] = "CAUTION"
     return smart
 
 
@@ -1282,16 +1314,20 @@ def _enrich_summary(smart: dict[str, Any]) -> dict[str, Any]:
     table = smart.get("attribute_table") or []
     fails = sum(1 for r in table if r.get("status") == "FAIL")
     warns = sum(1 for r in table if r.get("status") == "WARN")
-    if overall == "FAILED" or fails:
-        smart["health_meter"] = "Bad"
-    elif warns or (overall and overall not in ("PASSED", "OK", "")):
-        smart["health_meter"] = "Caution"
-    elif table or overall == "PASSED":
-        smart["health_meter"] = "Good"
-    elif smart.get("source") in ("none", None) and not table:
+    # UNKNOWN を注意や合格に混ぜない。属性表があっても自己診断が無ければ不明。
+    if overall in ("", "UNKNOWN", "NONE"):
+        smart["overall"] = "UNKNOWN"
         smart["health_meter"] = "Unknown"
+    elif overall == "FAILED" or fails:
+        smart["health_meter"] = "Bad"
+    elif warns or overall == "CAUTION":
+        smart["health_meter"] = "Caution"
+    elif overall == "PASSED":
+        smart["health_meter"] = "Good"
     else:
         smart["health_meter"] = "Unknown"
+        smart["overall"] = "UNKNOWN"
+    smart["smart_status"] = (smart.get("overall") or "UNKNOWN").upper()
 
     _enrich_host_io_totals(smart)
     smart["smartctl_available"] = _smartctl_available()
@@ -1308,7 +1344,10 @@ Get-PhysicalDisk | Select-Object `
   @{N='SizeGB';E={[math]::Round($_.Size/1GB,1)}} |
   ConvertTo-Json -Compress -Depth 4
 """
-    data = _run_ps(script)
+    try:
+        data = _run_ps(script, required=True)
+    except PowerShellFailed as exc:
+        raise DiskCollectionError(str(exc)) from exc
     if isinstance(data, dict):
         data = [data]
     if not data:
@@ -1431,21 +1470,26 @@ Get-PhysicalDisk | Select-Object `
         if not smart.get("firmware"):
             smart["firmware"] = disk["firmware"]
 
-        # If OS health is Healthy and we have no SMART table, still show basic meter from OS
-        if smart.get("source") == "none" and (disk.get("health_status") or "").lower() == "healthy":
-            smart["overall"] = "PASSED"
-            smart["health_meter"] = "Good"
-            if not elevated:
-                smart["needs_elevation"] = True
-                smart["note"] = (
-                    "OS上は Healthy ですが、属性テーブル・温度は未取得です。"
-                    "管理者として再起動すると WMI SMART（温度・通電時間など）を取得できます。"
-                )
-            else:
-                smart["note"] = (
-                    "OS上は Healthy。属性テーブルは未取得です。"
-                    "smartctl があるとさらに詳細を取得できます。"
-                )
+        # OS の Healthy と SMART の合否は別。取れていない SMART を PASSED にしない。
+        os_health = disk.get("health_status")
+        disk["os_health_status"] = os_health if os_health else "Unknown"
+        measured = str(smart.get("overall") or "").strip().upper()
+        if smart.get("source") in (None, "none") or measured in ("", "UNKNOWN", "NONE"):
+            smart["overall"] = "UNKNOWN"
+            smart["smart_status"] = "UNKNOWN"
+            if smart.get("source") in (None, "none"):
+                smart["health_meter"] = "Unknown"
+                if not elevated:
+                    smart["needs_elevation"] = True
+                if (os_health or "").lower() == "healthy":
+                    smart["note"] = (
+                        "OSの状態は Healthy です。SMARTは未取得のため不明です。"
+                        + (
+                            " 管理者として再起動すると WMI SMART（温度・通電時間など）を取得できます。"
+                            if not elevated
+                            else " smartctl があるとさらに詳細を取得できます。"
+                        )
+                    )
 
         smart = _enrich_summary(smart)
         smart = _flag_critical_raw(smart)

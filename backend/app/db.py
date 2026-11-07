@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 from app.config import DATA_DIR, DB_PATH, DEFAULT_SETTINGS
@@ -11,6 +11,18 @@ from app.config import DATA_DIR, DB_PATH, DEFAULT_SETTINGS
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# 診断・価格の履歴を無期限に貯めない
+HISTORY_RETENTION_DAYS = 180
+
+
+def _purge_expired(conn: sqlite3.Connection) -> None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=HISTORY_RETENTION_DAYS)).isoformat()
+    conn.execute("DELETE FROM snapshots WHERE created_at < ?", (cutoff,))
+    conn.execute("DELETE FROM disk_history WHERE created_at < ?", (cutoff,))
+    conn.execute("DELETE FROM alerts WHERE created_at < ?", (cutoff,))
+    conn.execute("DELETE FROM price_history WHERE fetched_at < ?", (cutoff,))
 
 
 def init_db() -> None:
@@ -83,9 +95,23 @@ def init_db() -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE INDEX IF NOT EXISTS idx_disk_history_device_id
+                ON disk_history (device_id, id);
+            CREATE INDEX IF NOT EXISTS idx_price_history_catalog_id
+                ON price_history (catalog_id, id);
+            CREATE INDEX IF NOT EXISTS idx_price_history_catalog_source
+                ON price_history (catalog_id, source, id);
+            CREATE INDEX IF NOT EXISTS idx_snapshots_created_at
+                ON snapshots (created_at);
+            CREATE INDEX IF NOT EXISTS idx_alerts_created_at
+                ON alerts (created_at);
+            CREATE INDEX IF NOT EXISTS idx_price_history_fetched_at
+                ON price_history (fetched_at);
             """
         )
         _ensure_default_settings(conn)
+        _purge_expired(conn)
 
 
 def _ensure_default_settings(conn: sqlite3.Connection) -> None:
@@ -143,6 +169,7 @@ def save_snapshot(overall_status: str, payload: dict[str, Any]) -> int:
             "INSERT INTO snapshots (created_at, overall_status, payload_json) VALUES (?, ?, ?)",
             (_utc_now(), overall_status, json.dumps(payload, ensure_ascii=False)),
         )
+        _purge_expired(conn)
         return int(cur.lastrowid)
 
 
@@ -166,6 +193,7 @@ def save_disk_history(disks: list[dict[str, Any]]) -> None:
                     json.dumps(d.get("smart") or {}, ensure_ascii=False),
                 ),
             )
+        _purge_expired(conn)
 
 
 def get_latest_snapshot() -> dict[str, Any] | None:
@@ -398,6 +426,7 @@ def add_price_point(
             """,
             (catalog_id, price_yen, source, url, note, _utc_now()),
         )
+        _purge_expired(conn)
 
 
 def get_latest_prices(catalog_ids: list[str]) -> dict[str, dict[str, Any]]:

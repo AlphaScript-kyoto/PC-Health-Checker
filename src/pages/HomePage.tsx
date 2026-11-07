@@ -81,9 +81,11 @@ export function HomePage({
               {statusJa(String(overall))}
             </span>
             <p className="muted" style={{ margin: 0 }}>
-              {status?.message && !status?.scanned_at
+              {status?.overall_status === 'Unknown' && status?.message
                 ? status.message
-                : '総合的な健康状態です。詳細は各タブで確認できます。'}
+                : status?.message && !status?.scanned_at
+                  ? status.message
+                  : '総合的な健康状態です。詳細は各タブで確認できます。'}
             </p>
             {about && (
               <p className="muted" style={{ margin: 0 }}>

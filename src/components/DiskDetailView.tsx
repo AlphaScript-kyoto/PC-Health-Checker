@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { statusJa } from '../lib/format'
+import { smartStatusJa, statusJa } from '../lib/format'
 import type { DiskInfo, DiskSmartInfo, SmartAttributeRow } from '../types'
 
 function statusClass(status: string): string {
@@ -86,6 +86,8 @@ export function buildDiskInfoRows(
     .filter(Boolean)
     .join(' ')
   return [
+    ['OSの状態', dash(disk.os_health_status || disk.health_status || '不明')],
+    ['SMART判定', smartStatusJa(disk.smart_status || smart.smart_status || smart.overall)],
     ['ファームウェア', dash(disk.firmware || smart.firmware)],
     [
       'シリアル番号',
@@ -216,7 +218,8 @@ export function DiskDetailView({
             {dash(disk.form_factor || smart.form_factor) !== '----'
               ? ` / ${dash(disk.form_factor || smart.form_factor)}`
               : ''}
-            {disk.health_status ? ` / OS: ${disk.health_status}` : ''}
+            {` / OS: ${disk.os_health_status || disk.health_status || '不明'}`}
+            {` / SMART: ${smartStatusJa(disk.smart_status || smart.smart_status || smart.overall)}`}
             {smart.source ? ` / 取得元: ${smart.source}` : ''}
           </p>
         </div>

@@ -4,7 +4,8 @@ from typing import Any
 
 from app.config import OLD_DRIVE_HINTS
 
-STATUS_ORDER = {"OK": 0, "Watch": 1, "ReplaceSoon": 2, "Critical": 3}
+# Unknown は「問題なし」より優先する。Watch 以上の明確な問題があればそちらを採用する。
+STATUS_ORDER = {"OK": 0, "Unknown": 1, "Watch": 2, "ReplaceSoon": 3, "Critical": 4}
 
 
 def _worse(a: str, b: str) -> str:
@@ -18,7 +19,18 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     disks_out: list[dict[str, Any]] = []
     volume_issues: list[dict[str, Any]] = []
     alerts: list[dict[str, Any]] = []
-    overall = "OK"
+    disk_error = raw.get("disk_collection_error")
+    overall = "Unknown" if disk_error else "OK"
+    if disk_error:
+        alerts.append(
+            {
+                "level": "Unknown",
+                "title": "ディスク情報を取得できませんでした",
+                "message": "PowerShellからの取得に失敗したため、判定は不明です。",
+                "device_id": None,
+                "kind": "disk",
+            }
+        )
 
     for vol in raw.get("volumes") or []:
         free_pct = vol.get("free_pct")
@@ -54,18 +66,42 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
         evaluated = dict(d)
         reasons: list[str] = []
         level = "OK"
-        health = (d.get("health_status") or "").lower()
-        smart = d.get("smart") or {}
+        health = (d.get("os_health_status") or d.get("health_status") or "").strip().lower()
+        smart = dict(d.get("smart") or {})
         attrs = smart.get("attributes") or {}
 
-        if health in ("warning", "unhealthy"):
-            level = _worse(level, "Critical" if health == "unhealthy" else "ReplaceSoon")
+        # OS が返す状態。SMART の合否とは混ぜない。
+        if health == "unhealthy":
+            evaluated["os_health_status"] = "Unhealthy"
+            level = _worse(level, "Critical")
             reasons.append(f"OS報告のディスク状態: {d.get('health_status')}")
+        elif health == "warning":
+            evaluated["os_health_status"] = "Warning"
+            level = _worse(level, "ReplaceSoon")
+            reasons.append(f"OS報告のディスク状態: {d.get('health_status')}")
+        elif health == "healthy":
+            evaluated["os_health_status"] = "Healthy"
+        else:
+            evaluated["os_health_status"] = "Unknown"
+            level = _worse(level, "Unknown")
+            reasons.append("OSのディスク状態を取得できませんでした")
 
-        overall_smart = (smart.get("overall") or "").upper()
+        overall_smart = (smart.get("smart_status") or smart.get("overall") or "").upper()
         if overall_smart == "FAILED":
+            evaluated["smart_status"] = "FAILED"
             level = _worse(level, "Critical")
             reasons.append("SMART自己診断が FAILED")
+        elif overall_smart == "PASSED":
+            evaluated["smart_status"] = "PASSED"
+        elif overall_smart == "CAUTION":
+            evaluated["smart_status"] = "CAUTION"
+        else:
+            # 未取得を合格にしない
+            evaluated["smart_status"] = "UNKNOWN"
+            smart["overall"] = "UNKNOWN"
+            smart["smart_status"] = "UNKNOWN"
+            if smart.get("health_meter") in (None, "", "Good"):
+                smart["health_meter"] = "Unknown"
 
         realloc = attrs.get("Reallocated_Sector_Ct") or 0
         pending = attrs.get("Current_Pending_Sector") or 0
@@ -131,6 +167,7 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
                 level = _worse(level, "Watch")
                 reasons.append(f"関連ボリューム空き {free_pct}%")
 
+        evaluated["smart"] = smart
         evaluated["risk_level"] = level
         evaluated["reasons"] = reasons
         evaluated["needs_replacement"] = level in ("ReplaceSoon", "Critical")
@@ -141,7 +178,11 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
             alerts.append(
                 {
                     "level": level,
-                    "title": f"ディスク注意: {model}",
+                    "title": (
+                        f"ディスク状態は不明です: {model}"
+                        if level == "Unknown"
+                        else f"ディスク注意: {model}"
+                    ),
                     "message": " / ".join(reasons) if reasons else level,
                     "device_id": d.get("device_id"),
                     "kind": "disk",
@@ -150,7 +191,7 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
 
     replacement_targets = [d for d in disks_out if d.get("needs_replacement")]
 
-    return {
+    result = {
         "overall_status": overall,
         "inventory": raw.get("inventory") or {},
         "disks": disks_out,
@@ -161,3 +202,7 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
         "elevated": bool(raw.get("elevated")),
         "smartctl_available": bool(raw.get("smartctl_available")),
     }
+    if disk_error:
+        result["message"] = "ディスク情報を取得できなかったため、判定は不明です。"
+        result["disk_collection_error"] = str(disk_error)
+    return result

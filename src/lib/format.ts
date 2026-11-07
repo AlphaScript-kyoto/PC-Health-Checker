@@ -44,6 +44,20 @@ export function statusJa(status: string | null | undefined): string {
   }
 }
 
+export function smartStatusJa(status: string | null | undefined): string {
+  switch ((status || '').toUpperCase()) {
+    case 'PASSED':
+    case 'OK':
+      return '合格'
+    case 'FAILED':
+      return '不合格'
+    case 'CAUTION':
+      return '注意'
+    default:
+      return '不明'
+  }
+}
+
 export function safetyLabel(safety: string): string {
   switch (safety) {
     case 'safe':

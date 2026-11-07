@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app import db
 from app.collectors.capacity import collect_volumes
-from app.collectors.disks import collect_disks, is_elevated, smartctl_available
+from app.collectors.disks import (
+    DiskCollectionError,
+    collect_disks,
+    is_elevated,
+    smartctl_available,
+)
+
+log = logging.getLogger("pc-health.scanner")
 from app.collectors.inventory import collect_inventory
 from app.engine import evaluate
 from app.notify import notify
@@ -246,7 +254,13 @@ def _collect_all_with_progress() -> dict[str, Any]:
 
     _checkpoint()
     _set_health_progress(phase="disks", percent=35, message="ディスク情報・SMART を取得中…")
-    disks = collect_disks()
+    disk_error = None
+    try:
+        disks = collect_disks()
+    except DiskCollectionError as exc:
+        log.warning("disk collection failed: %s", exc)
+        disks = []
+        disk_error = str(exc)
 
     _checkpoint()
     _set_health_progress(phase="volumes", percent=60, message="ドライブの空き容量を確認中…")
@@ -284,6 +298,7 @@ def _collect_all_with_progress() -> dict[str, Any]:
         "volumes": volumes,
         "elevated": elevated,
         "smartctl_available": smartctl_available(),
+        "disk_collection_error": disk_error,
     }
 
 
@@ -303,7 +318,11 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
 
             _checkpoint()
             _set_health_progress(phase="evaluate", percent=75, message="リスク判定と提案を作成中…")
-            changes = db.upsert_known_disks(raw.get("disks") or [])
+            # 取得失敗の空リストで「ディスクが消えた」と記録しない
+            if raw.get("disk_collection_error"):
+                changes = {"appeared": [], "disappeared": []}
+            else:
+                changes = db.upsert_known_disks(raw.get("disks") or [])
             evaluated = evaluate(raw, settings)
 
             for disk in changes.get("appeared") or []:

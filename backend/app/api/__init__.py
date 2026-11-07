@@ -7,15 +7,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app import db
+from app.local_guard import ALLOWED_ORIGINS, LocalApiGuard
 from app.scanner import get_last_scan, get_scan_progress, run_scan, start_scan
 
 app = FastAPI(title="パソコンちぇっ君", docs_url="/api/docs")
+# 先に追加したミドルウェアが内側。外側の CORS が事前確認を返し、内側でトークンを見る。
+app.add_middleware(LocalApiGuard)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=sorted(ALLOWED_ORIGINS),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type", "X-PCHC-Token"],
 )
 
 
@@ -166,11 +169,20 @@ def api_put_settings(body: SettingsUpdate) -> dict[str, Any]:
         updates["daily_scan_time"] = (
             f"{int(raw.split(':')[0]):02d}:{int(raw.split(':')[1]):02d}"
         )
-    settings = db.update_settings(updates)
     if "startup_enabled" in updates:
         from app.startup import set_startup
 
-        set_startup(bool(updates["startup_enabled"]))
+        # ショートカットの作成に失敗したのに成功扱いにしない
+        if not set_startup(bool(updates["startup_enabled"])):
+            raise HTTPException(
+                500,
+                "Windowsの自動起動を変更できませんでした。"
+                "起動するアプリが見つからないか、ショートカットの作成に失敗しました。",
+            )
+    settings = db.update_settings(updates)
+    from app.startup import is_startup_enabled
+
+    settings["startup_enabled"] = is_startup_enabled()
     return settings
 
 

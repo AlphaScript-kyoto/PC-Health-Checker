@@ -10,11 +10,13 @@ import {
   dialog,
 } from 'electron'
 import { spawn, execSync, execFile, type ChildProcess } from 'node:child_process'
+import crypto from 'node:crypto'
 import { promisify } from 'node:util'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const execFileAsync = promisify(execFile)
 
@@ -23,6 +25,9 @@ const PORT = 8787
 const BASE = `http://${HOST}:${PORT}`
 const APP_TITLE = 'パソコンちぇっ君'
 const VITE_ARG_PREFIX = '--pchc-vite='
+const DEV_VITE_PORTS = new Set([5173, 5174, 5175, 5176])
+/** この起動のあいだだけ有効な API トークン。画面とバックエンドだけが知る。 */
+const apiToken = crypto.randomBytes(32).toString('hex')
 
 /** 通常起動と管理者起動で Temp が違うことがあるため、LOCALAPPDATA に置く */
 function elevateStateDir(): string {
@@ -78,17 +83,34 @@ function quoteForPsSingle(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
+function acceptLocalDevUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined
+  const normalized = normalizeDevUrl(url.trim())
+  try {
+    const parsed = new URL(normalized)
+    if (parsed.protocol !== 'http:') return undefined
+    if (parsed.hostname !== '127.0.0.1') return undefined
+    if (!DEV_VITE_PORTS.has(Number(parsed.port))) return undefined
+    return normalized
+  } catch {
+    return undefined
+  }
+}
+
 function getViteDevServerUrl(): string | undefined {
-  const fromEnv = process.env.VITE_DEV_SERVER_URL?.trim()
+  // 配布版は開発サーバーの URL を一切使わない（同梱 HTML だけ）
+  if (app.isPackaged) return undefined
+  const fromEnv = acceptLocalDevUrl(process.env.VITE_DEV_SERVER_URL)
   if (fromEnv) return fromEnv
   const fromArg = process.argv.find((a) => a.startsWith(VITE_ARG_PREFIX))
   if (fromArg) {
-    const url = fromArg.slice(VITE_ARG_PREFIX.length).trim()
+    const url = acceptLocalDevUrl(fromArg.slice(VITE_ARG_PREFIX.length))
     if (url) return url
   }
-  // 管理者再起動で引数/環境変数が落ちても、共有ファイルから復元する
+  // 管理者再起動で引数/環境変数が落ちても、共有ファイルから復元する。
+  // ローカルの Vite 以外（書き換えられた URL）は使わない。
   try {
-    const fromFile = fs.readFileSync(viteDevUrlPath(), 'utf8').trim()
+    const fromFile = acceptLocalDevUrl(fs.readFileSync(viteDevUrlPath(), 'utf8'))
     if (fromFile) return fromFile
   } catch {
     // ignore
@@ -97,7 +119,7 @@ function getViteDevServerUrl(): string | undefined {
 }
 
 function persistViteDevServerUrl(url: string | undefined) {
-  if (!url) return
+  if (app.isPackaged || !url) return
   try {
     fs.writeFileSync(viteDevUrlPath(), url, 'utf8')
     process.env.VITE_DEV_SERVER_URL = url
@@ -153,6 +175,10 @@ function startBackend() {
     logFd = 'ignore'
   }
 
+  const appExe =
+    process.env.PORTABLE_EXECUTABLE_FILE && fs.existsSync(process.env.PORTABLE_EXECUTABLE_FILE)
+      ? process.env.PORTABLE_EXECUTABLE_FILE
+      : process.execPath
   pyProc = spawn(py, args, {
     cwd,
     windowsHide: true,
@@ -162,6 +188,10 @@ function startBackend() {
       ...process.env,
       PYTHONUTF8: '1',
       PYTHONPATH: app.isPackaged ? cwd : path.join(ROOT, 'backend'),
+      PCHC_API_TOKEN: apiToken,
+      PCHC_APP_EXE: appExe,
+      PCHC_APP_ARGS: app.isPackaged ? '' : ROOT,
+      PCHC_APP_CWD: app.isPackaged ? path.dirname(appExe) : ROOT,
     },
   })
   pyProc.unref?.()
@@ -217,7 +247,14 @@ function waitForServer(timeoutMs = 45000): Promise<void> {
   const start = Date.now()
   return new Promise((resolve, reject) => {
     const tick = () => {
-      const req = http.get(`${BASE}/api/health`, (res) => {
+      const req = http.get(
+        {
+          hostname: HOST,
+          port: PORT,
+          path: '/api/health',
+          headers: { 'X-PCHC-Token': apiToken },
+        },
+        (res) => {
         res.resume()
         if (res.statusCode === 200) resolve()
         else if (Date.now() - start > timeoutMs) reject(new Error('timeout'))
@@ -584,8 +621,10 @@ async function elevateAndQuit(): Promise<boolean> {
   }
 
   stopBackend()
-  const viteUrl = normalizeDevUrl(getViteDevServerUrl() || 'http://127.0.0.1:5173/')
-  persistViteDevServerUrl(viteUrl)
+  const viteUrl = app.isPackaged
+    ? undefined
+    : normalizeDevUrl(getViteDevServerUrl() || 'http://127.0.0.1:5173/')
+  if (viteUrl) persistViteDevServerUrl(viteUrl)
 
   // 管理者プロセスは開発サーバーに繋がらないことがあるため、先に UI を dist へ書き出す
   if (!app.isPackaged) {
@@ -655,11 +694,92 @@ async function elevateAndQuit(): Promise<boolean> {
   }
 }
 
+function isInsideDir(child: string, parent: string): boolean {
+  const c = path.resolve(child).toLowerCase()
+  const p = path.resolve(parent).toLowerCase()
+  return c === p || c.startsWith(p.endsWith(path.sep) ? p : p + path.sep)
+}
+
+function isTrustedRendererUrl(rawUrl: string): boolean {
+  if (rawUrl.startsWith('data:text/html')) return true
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return false
+  }
+  if (parsed.protocol === 'file:') {
+    try {
+      return isInsideDir(fileURLToPath(parsed), path.join(ROOT, 'dist'))
+    } catch {
+      return false
+    }
+  }
+  if (app.isPackaged) return false
+  if (parsed.protocol !== 'http:') return false
+  if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost') return false
+  return DEV_VITE_PORTS.has(Number(parsed.port))
+}
+
+function isOwnedSender(contents: Electron.WebContents): boolean {
+  return BrowserWindow.getAllWindows().some(
+    (win) => !win.isDestroyed() && win.webContents.id === contents.id,
+  )
+}
+
+function hardenWindow(win: BrowserWindow) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        void shell.openExternal(url)
+      }
+    } catch {
+      // 開けない URL は無視する
+    }
+    return { action: 'deny' }
+  })
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!isTrustedRendererUrl(url)) event.preventDefault()
+  })
+}
+
+function isDirectoryTarget(targetPath: string): string | null {
+  if (!targetPath || targetPath.includes('\0') || targetPath.includes('__other__')) return null
+  let resolved: string
+  try {
+    resolved = path.resolve(targetPath.trim())
+  } catch {
+    return null
+  }
+  try {
+    if (!fs.statSync(resolved).isDirectory()) return null
+  } catch {
+    return null
+  }
+  return resolved
+}
+
 async function loadRenderer(win: BrowserWindow, query?: Record<string, string>) {
   const distIndex = path.join(ROOT, 'dist', 'index.html')
   const q = query || {}
   const search = new URLSearchParams(q).toString()
   const withQuery = (base: string) => (search ? `${base}${base.includes('?') ? '&' : '?'}${search}` : base)
+
+  // 配布版は %LOCALAPPDATA% の URL や開発サーバーを読まず、同梱の HTML だけを開く
+  if (app.isPackaged) {
+    if (fs.existsSync(distIndex)) {
+      await win.loadFile(distIndex, { query: q })
+      return
+    }
+    const message = '同梱の画面ファイルが見つかりません。配布物が壊れている可能性があります。'
+    await win.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(
+        `<!doctype html><html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#eef3f7;color:#1c2430"><h2>パソコンちぇっ君</h2><p>${message}</p></body></html>`,
+      )}`,
+    )
+    return
+  }
 
   const candidates: string[] = []
   const known = getViteDevServerUrl()
@@ -738,6 +858,7 @@ async function openDiskDetailWindow(deviceId: string): Promise<boolean> {
   })
 
   diskDetailWindows.set(id, win)
+  hardenWindow(win)
   win.once('ready-to-show', () => win.show())
   win.on('closed', () => {
     if (diskDetailWindows.get(id) === win) diskDetailWindows.delete(id)
@@ -777,12 +898,8 @@ function createWindow() {
     mainWindow?.show()
   })
 
+  hardenWindow(mainWindow)
   void loadRenderer(mainWindow)
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
-    return { action: 'deny' }
-  })
 
   mainWindow.on('close', (e) => {
     if (!quitting) {
@@ -813,7 +930,11 @@ function createTray() {
       label: '今すぐスキャン',
       click: () => {
         http
-          .request(`${BASE}/api/scan`, { method: 'POST' }, (res) => res.resume())
+          .request(
+            `${BASE}/api/scan`,
+            { method: 'POST', headers: { 'X-PCHC-Token': apiToken } },
+            (res) => res.resume(),
+          )
           .on('error', () => {})
           .end()
       },
@@ -871,23 +992,39 @@ function registerIpc() {
     return false
   })
 
-  ipcMain.handle('desktop:openPath', async (_event, targetPath: string) => {
-    if (!targetPath || String(targetPath).includes('__other__')) {
+  ipcMain.handle('desktop:openPath', async (event, targetPath: string) => {
+    const frameUrl = event.senderFrame?.url || event.sender.getURL()
+    if (!isOwnedSender(event.sender) || !isTrustedRendererUrl(frameUrl)) {
+      return 'denied'
+    }
+    const folder = isDirectoryTarget(String(targetPath ?? ''))
+    if (!folder) {
       await dialog.showMessageBox({
         type: 'info',
         title: APP_TITLE,
-        message: 'この項目はまとめ表示のため、直接開けません。',
+        message: 'フォルダだけを開けます。',
+        detail: 'ファイルや、実在しないパス、まとめ表示の項目は開きません。',
       })
-      return 'skipped'
+      return 'denied'
     }
-    const result = await shell.openPath(String(targetPath))
+    const result = await shell.openPath(folder)
     if (result) {
       dialog.showErrorBox('開けませんでした', result)
     }
     return result
   })
 
-  ipcMain.handle('desktop:getBackendUrl', async () => BASE)
+  ipcMain.handle('desktop:getBackendUrl', async (event) => {
+    const frameUrl = event.senderFrame?.url || event.sender.getURL()
+    if (!isOwnedSender(event.sender) || !isTrustedRendererUrl(frameUrl)) return ''
+    return BASE
+  })
+
+  ipcMain.handle('desktop:getApiToken', async (event) => {
+    const frameUrl = event.senderFrame?.url || event.sender.getURL()
+    if (!isOwnedSender(event.sender) || !isTrustedRendererUrl(frameUrl)) return ''
+    return apiToken
+  })
 
   ipcMain.handle('desktop:openDiskDetail', async (_event, deviceId: string) => {
     return openDiskDetailWindow(String(deviceId || ''))

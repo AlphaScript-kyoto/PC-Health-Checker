@@ -40,8 +40,9 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const [lastScannedAt, setLastScannedAt] = useState<string | null>(null)
-  const autoScanStarted = useRef(false)
   const lastSeenScanAt = useRef<string | null>(null)
+  const scanningRef = useRef(false)
+  scanningRef.current = scanning
   const watchingBackground = useRef(false)
   const scanSession = useRef(0)
 
@@ -210,22 +211,25 @@ export default function App() {
     }
   }, [monitorScan, showToast])
 
-  // 起動時は必ず健康診断スキャンを実行
+  // 起動時は必ず健康診断スキャンを実行。
+  // 開発時の StrictMode は Effect を一度片付けてからもう一度走らせる。
+  // 先に「開始済み」にしてしまうと、片付けで消したタイマーが二度目に戻らない。
+  const runScanRef = useRef(runScan)
+  runScanRef.current = runScan
   useEffect(() => {
-    if (autoScanStarted.current) return
-    autoScanStarted.current = true
     const timer = window.setTimeout(() => {
-      void runScan()
+      void runScanRef.current()
     }, 1200)
     return () => window.clearTimeout(timer)
-  }, [runScan])
+  }, [])
 
-  // バックエンドの毎日スキャンなど、UI外で走った結果を取り込む
+  // バックエンドの毎日スキャンなど、UI外で走った結果を取り込む。
+  // scanning を依存に入れると、検知した瞬間の setScanning でこの Effect が止まり、監視が続かない。
   useEffect(() => {
     let cancelled = false
 
     const tick = async () => {
-      if (cancelled || scanning || watchingBackground.current) return
+      if (cancelled || scanningRef.current || watchingBackground.current) return
       try {
         const progress = await getScanProgress()
         if (cancelled) return
@@ -292,7 +296,7 @@ export default function App() {
       cancelled = true
       window.clearInterval(id)
     }
-  }, [scanning, showToast, refreshLastScan])
+  }, [showToast, refreshLastScan])
 
   const elevate = async () => {
     if (elevating) return

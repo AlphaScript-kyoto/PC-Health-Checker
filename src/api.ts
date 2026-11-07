@@ -16,15 +16,31 @@ export class ApiError extends Error {
   }
 }
 
+let tokenTask: Promise<string> | null = null
+
+async function apiToken(): Promise<string> {
+  const read = window.desktopApi?.getApiToken
+  if (!read) return ''
+  if (!tokenTask) {
+    tokenTask = read().catch((err) => {
+      tokenTask = null
+      throw err
+    })
+  }
+  return tokenTask
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
   const url = `${apiBase()}${path.startsWith('/') ? path : `/${path}`}`
+  const token = await apiToken()
   const res = await fetch(url, {
     ...init,
     headers: {
       Accept: 'application/json',
+      ...(token ? { 'X-PCHC-Token': token } : {}),
       ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
       ...init?.headers,
     },

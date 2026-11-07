@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from app.collectors.capacity import collect_volumes
-from app.collectors.disks import collect_disks, is_elevated, smartctl_available
+from app.collectors.disks import (
+    DiskCollectionError,
+    collect_disks,
+    is_elevated,
+    smartctl_available,
+)
 from app.collectors.inventory import collect_inventory
 
 
 def collect_all() -> dict:
-    disks = collect_disks()
+    disk_error = None
+    try:
+        disks = collect_disks()
+    except DiskCollectionError as exc:
+        disks = []
+        disk_error = str(exc)
     volumes = collect_volumes()
     inventory = collect_inventory()
     elevated = is_elevated()
@@ -42,4 +52,5 @@ def collect_all() -> dict:
         "volumes": volumes,
         "elevated": elevated,
         "smartctl_available": smartctl_available(),
+        "disk_collection_error": disk_error,
     }

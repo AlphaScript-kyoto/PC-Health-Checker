@@ -57,6 +57,7 @@ export interface SmartAttributeRow {
 
 export interface DiskSmartInfo {
   overall?: string
+  smart_status?: string
   health_meter?: string
   temperature_c?: number
   power_on_hours?: number
@@ -95,6 +96,8 @@ export interface DiskInfo {
   bus_type?: string
   size_gb?: number
   health_status?: string
+  os_health_status?: string
+  smart_status?: string
   operational_status?: string
   firmware?: string
   free_pct?: number
