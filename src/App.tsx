@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   getAbout,
   getScanProgress,
+  getSettings,
   getStatus,
   postScan,
   postScanPause,
@@ -17,6 +18,7 @@ import { PricesPage } from './pages/PricesPage'
 import { RecommendationsPage } from './pages/RecommendationsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { SpacePage } from './pages/SpacePage'
+import { adoptServerTheme, isThemePreference } from './theme'
 import type { ScanProgressInfo, TabId } from './types'
 import './App.css'
 
@@ -77,6 +79,20 @@ export default function App() {
 
   const goRecommendations = useCallback(() => {
     setTab('recommendations')
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    getSettings()
+      .then((settings) => {
+        if (!cancelled && isThemePreference(settings.theme)) adoptServerTheme(settings.theme)
+      })
+      .catch(() => {
+        // 保存済みの画面の色（このパソコンの記憶）をそのまま使う
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {

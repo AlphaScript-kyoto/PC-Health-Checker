@@ -321,6 +321,7 @@ PC診断、履歴表示、容量マップ作成はローカルで動作する。
 | 希望容量 | 2TB | 0.1〜20TB |
 | 優先項目 | 速度 | `speed` / `quiet` / `capacity` / `price` |
 | 毎日のスキャン時刻 | 09:00 | 24時間表記の `HH:MM` |
+| 画面の色 | システムに合わせる | `system` / `light` / `dark`。`system` は OS のライト・ダークに従う |
 | Windows起動時に開始 | 無効 | 有効・無効。登録に失敗した場合はエラーとし、成功した設定としては保存しない。配布版の登録先は同梱の実行ファイルで、開発用の `run_app.vbs` は使わない |
 
 ### 5.8 自動スキャン
@@ -722,6 +723,7 @@ npm run release
 | `electron/main.ts` | Electronライフサイクル、ウィンドウ、トレイ、昇格、バックエンド管理 |
 | `electron/preload.ts` | Rendererへ公開する安全なIPC API |
 | `src/App.tsx` | メイン画面構成とタブ制御 |
+| `src/theme.ts` | 画面テーマの保存と適用 |
 | `src/api.ts` | FastAPIクライアント |
 | `src/types.ts` | UIで使用するデータ型 |
 | `src/pages/HomePage.tsx` | 総合状態とスキャン操作 |

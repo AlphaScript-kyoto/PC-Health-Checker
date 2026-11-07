@@ -218,6 +218,7 @@ export interface AppSettings {
   priority?: string
   daily_scan_time?: string
   startup_enabled?: boolean
+  theme?: 'system' | 'light' | 'dark'
   [key: string]: unknown
 }
 

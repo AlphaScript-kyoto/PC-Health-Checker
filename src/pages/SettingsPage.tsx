@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getSettings, putSettings } from '../api'
+import { isThemePreference, setThemePreference, type ThemePreference } from '../theme'
 import type { AppSettings } from '../types'
 
 interface Props {
@@ -17,6 +18,7 @@ const DEFAULTS: AppSettings = {
   priority: 'speed',
   daily_scan_time: '09:00',
   startup_enabled: false,
+  theme: 'system',
 }
 
 export function SettingsPage({ showToast }: Props) {
@@ -63,6 +65,7 @@ export function SettingsPage({ showToast }: Props) {
         priority: String(form.priority),
         daily_scan_time: String(form.daily_scan_time),
         startup_enabled: Boolean(form.startup_enabled),
+        theme: isThemePreference(form.theme) ? form.theme : 'system',
       })
       setForm({ ...DEFAULTS, ...saved })
       showToast('設定を保存しました')
@@ -86,11 +89,30 @@ export function SettingsPage({ showToast }: Props) {
     <div className="page">
       <div className="page-head">
         <h2>設定</h2>
-        <p>通知・容量しきい値・買い替え希望を調整できます。</p>
+        <p>画面の色、通知、容量のしきい値、買い替えの希望を調整できます。</p>
       </div>
 
       <section className="panel">
         <div className="grid-2">
+          <label className="field">
+            <span>画面の色</span>
+            <select
+              value={isThemePreference(form.theme) ? form.theme : 'system'}
+              onChange={(e) => {
+                const theme = e.target.value as ThemePreference
+                update('theme', theme)
+                setThemePreference(theme)
+                void putSettings({ theme }).catch(() => {
+                  showToast('色は切り替わりました。保存は「設定を保存」をもう一度押してください')
+                })
+              }}
+            >
+              <option value="system">システムに合わせる</option>
+              <option value="light">ライト</option>
+              <option value="dark">ダーク</option>
+            </select>
+          </label>
+
           <label className="field">
             <span>通知を有効にする</span>
             <select

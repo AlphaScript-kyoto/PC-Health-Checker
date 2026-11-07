@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { getStatus } from './api'
+import { getSettings, getStatus } from './api'
+import { adoptServerTheme, isThemePreference } from './theme'
 import { DiskDetailView } from './components/DiskDetailView'
 import type { DiskInfo } from './types'
 import './App.css'
@@ -12,6 +13,18 @@ export function DiskDetailApp({ deviceId }: Props) {
   const [disk, setDisk] = useState<DiskInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    getSettings()
+      .then((settings) => {
+        if (!cancelled && isThemePreference(settings.theme)) adoptServerTheme(settings.theme)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false

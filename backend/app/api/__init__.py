@@ -33,6 +33,7 @@ class SettingsUpdate(BaseModel):
     priority: str | None = None
     daily_scan_time: str | None = None
     startup_enabled: bool | None = None
+    theme: str | None = None
 
 
 class SpaceScanBody(BaseModel):
@@ -162,6 +163,8 @@ def api_put_settings(body: SettingsUpdate) -> dict[str, Any]:
         "price",
     ):
         raise HTTPException(400, "priority must be speed|quiet|capacity|price")
+    if "theme" in updates and updates["theme"] not in ("system", "light", "dark"):
+        raise HTTPException(400, "theme must be system|light|dark")
     if "daily_scan_time" in updates:
         raw = str(updates["daily_scan_time"]).strip()
         if not _valid_daily_scan_time(raw):

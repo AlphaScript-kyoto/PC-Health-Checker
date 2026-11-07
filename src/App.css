@@ -12,7 +12,7 @@
   flex-direction: column;
   gap: 22px;
   border-right: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.28));
+  background: var(--nav-bg);
   backdrop-filter: blur(18px);
 }
 
@@ -59,13 +59,13 @@
 }
 
 .nav-item:hover {
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--hover);
   color: var(--ink);
 }
 
 .nav-item.is-active {
-  background: var(--ink);
-  color: #fff;
+  background: var(--nav-active);
+  color: var(--nav-active-ink);
 }
 
 .main-column {
@@ -160,8 +160,8 @@
   min-width: 0;
   padding: 10px 12px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.55);
-  box-shadow: inset 0 0 0 1px rgba(28, 36, 48, 0.08);
+  background: var(--card-soft);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .scan-bar-label {
@@ -249,7 +249,7 @@
 
 .catalog-fold {
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.55);
+  background: var(--card-soft);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 
@@ -281,7 +281,7 @@
 .catalog-brand {
   margin-top: 6px;
   border-radius: 12px;
-  background: rgba(28, 36, 48, 0.03);
+  background: var(--soft);
 }
 
 .catalog-brand-head {
@@ -312,13 +312,13 @@
   margin: 0;
   padding: 10px 12px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.78);
+  background: var(--card-strong);
   box-shadow: inset 0 0 0 1px var(--line);
   cursor: pointer;
 }
 
 .catalog-item:hover {
-  background: #fff;
+  background: var(--panel-solid);
 }
 
 .catalog-item-text {
@@ -359,7 +359,7 @@
   min-height: 118px;
   padding: 12px;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.78);
+  background: var(--card-strong);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 
@@ -416,7 +416,7 @@
 .price-chart {
   display: block;
   width: 100%;
-  background: rgba(28, 36, 48, 0.03);
+  background: var(--soft);
   border-radius: 10px;
 }
 
@@ -456,12 +456,12 @@
   font-size: 11px;
   line-height: 1.4;
   border-radius: 10px;
-  background: rgba(28, 36, 48, 0.03);
+  background: var(--soft);
 }
 
 .keepa-fold {
   border-radius: 10px;
-  background: rgba(28, 36, 48, 0.03);
+  background: var(--soft);
   padding: 6px 8px 8px;
 }
 
@@ -489,7 +489,7 @@
   width: 100%;
   margin-top: 8px;
   border-radius: 8px;
-  background: #fff;
+  background: var(--panel-solid);
 }
 
 .keepa-note {
@@ -542,8 +542,8 @@
   z-index: 50;
   padding: 12px 18px;
   border-radius: 999px;
-  background: rgba(28, 36, 48, 0.92);
-  color: white;
+  background: var(--toast-bg);
+  color: var(--toast-ink);
   font-size: 13px;
   font-weight: 600;
   box-shadow: 0 12px 30px rgba(28, 36, 48, 0.22);
@@ -643,7 +643,7 @@
   border: 0;
   border-radius: 12px;
   padding: 11px 12px;
-  background: rgba(255, 255, 255, 0.88);
+  background: var(--input-bg);
   box-shadow: inset 0 0 0 1px var(--line);
   color: var(--ink);
   font-size: 14px;
@@ -661,7 +661,7 @@
   cursor: pointer;
   border-radius: 16px;
   padding: 14px;
-  background: rgba(255, 255, 255, 0.66);
+  background: var(--card);
   box-shadow: inset 0 0 0 1px var(--line);
   color: inherit;
   transition:
@@ -671,13 +671,13 @@
 }
 
 .drive-card:hover {
-  background: #fff;
+  background: var(--panel-solid);
   transform: translateY(-1px);
 }
 
 .drive-card.is-active {
   box-shadow: inset 0 0 0 2px var(--ink);
-  background: #fff;
+  background: var(--panel-solid);
 }
 
 .drive-card strong {
@@ -706,7 +706,7 @@
   align-items: center;
   padding: 12px 14px;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--card);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 
@@ -744,7 +744,7 @@
 .progress-track {
   height: 10px;
   border-radius: 999px;
-  background: rgba(28, 36, 48, 0.08);
+  background: var(--track);
   overflow: hidden;
 }
 
@@ -770,14 +770,14 @@
   color: inherit;
   padding: 14px;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--card);
   box-shadow: inset 0 0 0 1px var(--line);
   transition: transform 120ms ease, background 140ms ease;
 }
 
 .news-card:hover {
   transform: translateY(-2px);
-  background: #fff;
+  background: var(--panel-solid);
 }
 
 .news-card img {
@@ -785,7 +785,7 @@
   height: 120px;
   object-fit: cover;
   border-radius: 12px;
-  background: #d9e4ef;
+  background: var(--news-img);
 }
 
 .news-card h3 {
@@ -797,7 +797,7 @@
 .disk-crystal {
   padding: 14px 16px 16px;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--card);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 
@@ -819,7 +819,7 @@
   padding: 8px;
   border-radius: 14px;
   background: rgba(63, 124, 240, 0.14);
-  color: #2f5fbf;
+  color: var(--badge-info);
   text-align: center;
 }
 
@@ -836,20 +836,20 @@
 .disk-health-badge.ok,
 .disk-health-badge.good {
   background: rgba(31, 157, 106, 0.16);
-  color: #1a7a52;
+  color: var(--badge-ok);
 }
 
 .disk-health-badge.watch,
 .disk-health-badge.caution,
 .disk-health-badge.replacesoon {
   background: rgba(214, 152, 40, 0.18);
-  color: #9a6a10;
+  color: var(--badge-watch);
 }
 
 .disk-health-badge.critical,
 .disk-health-badge.bad {
   background: rgba(200, 70, 70, 0.16);
-  color: #b03a3a;
+  color: var(--badge-bad);
 }
 
 .disk-crystal-title h4 {
@@ -871,12 +871,12 @@
   font-weight: 700;
   font-size: 14px;
   background: rgba(63, 124, 240, 0.14);
-  color: #2f5fbf;
+  color: var(--badge-info);
 }
 
 .disk-temp-pill.is-hot {
   background: rgba(200, 70, 70, 0.14);
-  color: #b03a3a;
+  color: var(--badge-bad);
 }
 
 .disk-kv-grid {
@@ -892,7 +892,7 @@
   gap: 8px;
   align-items: baseline;
   padding: 4px 0;
-  border-bottom: 1px dashed rgba(28, 36, 48, 0.08);
+  border-bottom: 1px dashed var(--line);
 }
 
 .disk-kv dt {
@@ -1034,9 +1034,9 @@
   min-height: 100vh;
   padding: 10px 14px 12px;
   background:
-    radial-gradient(1200px 500px at 10% -10%, rgba(63, 124, 240, 0.16), transparent 55%),
-    radial-gradient(900px 420px at 100% 0%, rgba(42, 157, 143, 0.12), transparent 50%),
-    #eef3f7;
+    radial-gradient(1200px 500px at 10% -10%, var(--glow-blue), transparent 55%),
+    radial-gradient(900px 420px at 100% 0%, var(--glow-green), transparent 50%),
+    var(--bg0);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1103,14 +1103,14 @@
 .smart-table td {
   padding: 6px 8px;
   text-align: left;
-  border-bottom: 1px solid rgba(28, 36, 48, 0.08);
+  border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
 
 .smart-table th {
   position: sticky;
   top: 0;
-  background: #f3f7fc;
+  background: var(--table-head);
   z-index: 1;
 }
 

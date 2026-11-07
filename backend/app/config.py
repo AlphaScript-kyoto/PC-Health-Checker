@@ -56,6 +56,7 @@ DEFAULT_SETTINGS = {
     "priority": "speed",
     "daily_scan_time": "09:00",
     "startup_enabled": False,
+    "theme": "system",
 }
 
 OLD_DRIVE_HINTS = {
