@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import socket
 import sys
 import threading
 import time
@@ -19,8 +21,10 @@ from PIL import Image, ImageDraw
 
 from app import db
 from app.api import app as fastapi_app, mount_ui
-from app.config import APP_NAME, HOST, PORT, BASE_URL, SCAN_INTERVAL_SEC
-from app.scanner import run_scan, set_status_callback
+from app.config import APP_NAME, BASE_URL, DATA_DIR, HOST, PORT, SCAN_INTERVAL_SEC
+from app.net_bind import port_is_free
+from app.scanner import health_scan_succeeded, run_scan, set_status_callback
+from app.schedule import DAILY_RETRY_SEC, daily_is_due, startup_covers_daily
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,33 +99,69 @@ def _parse_daily_scan_time(value: Any) -> tuple[int, int]:
     return 9, 0
 
 
-def _run_scan_jobs(label: str) -> None:
-    """毎日スキャンは手動と同じく健康診断＋容量マップを並行実行する。"""
+def _pid_path() -> Path:
+    return DATA_DIR / "backend.pid"
+
+
+def write_backend_pid() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _pid_path().write_text(str(os.getpid()), encoding="utf-8")
+
+
+def remove_backend_pid() -> None:
+    path = _pid_path()
+    try:
+        if path.is_file() and path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _wait_until_accepting(timeout_sec: float) -> bool:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((HOST, PORT), timeout=0.4):
+                return True
+        except OSError:
+            time.sleep(0.2)
+    return False
+
+
+def _run_scan_jobs(label: str, *, announce: bool) -> bool:
+    """健康診断を走らせ、成功したときだけ True。失敗を「今日は済んだ」にしない。"""
     from app.notify import notify
-    from app.scanner import get_scan_progress, start_scan
+    from app.scanner import get_last_scan, get_scan_progress, start_scan
 
     log.info("%s starting…", label)
     started = start_scan(notify_alerts=True)
-    if not started.get("started") and started.get("message") == "already running":
-        log.info("%s: another scan is already running — waiting for it", label)
+    if not started.get("started"):
+        if started.get("message") == "already running":
+            log.info("%s: another scan is already running — waiting for it", label)
+        else:
+            log.warning("%s: could not start (%s)", label, started)
+            return False
 
     deadline = time.time() + 60 * 45
-    while time.time() < deadline:
+    while time.time() < deadline and not _scheduler_stop.is_set():
         progress = get_scan_progress()
         if not progress.get("running"):
             break
         time.sleep(1.0)
     else:
-        log.warning("%s: timed out waiting for scan to finish", label)
+        if not _scheduler_stop.is_set():
+            log.warning("%s: timed out waiting for scan to finish", label)
+            return False
 
+    ok = health_scan_succeeded()
     last = None
     try:
-        from app.scanner import get_last_scan
-
         last = get_last_scan()
     except Exception:
         pass
-    log.info("%s finished: %s", label, (last or {}).get("overall_status"))
+    log.info("%s finished: ok=%s status=%s", label, ok, (last or {}).get("overall_status"))
+    if not ok:
+        return False
 
     try:
         from app.price_tracker import maybe_weekly_price_job
@@ -130,28 +170,42 @@ def _run_scan_jobs(label: str) -> None:
     except Exception:
         log.exception("Weekly price job failed")
 
-    try:
-        notify(APP_NAME, f"{label}が完了しました", open_dashboard=False)
-    except Exception:
-        log.exception("Daily scan notify failed")
+    if announce:
+        try:
+            notify(APP_NAME, f"{label}が完了しました", open_dashboard=False)
+        except Exception:
+            log.exception("Daily scan notify failed")
+    return True
 
 
 def _scheduler_loop() -> None:
-    """毎日の設定時刻にスキャンする（起動時スキャンはフロント側で実施）。"""
+    """待ち受けのあと起動時スキャンを行い、成功したときだけ定刻分を済ませる。"""
     from datetime import datetime, timedelta
 
-    time.sleep(3)
+    startup_ok = False
+    try:
+        startup_ok = _run_scan_jobs("起動時スキャン", announce=False)
+    except Exception:
+        log.exception("Startup scan failed")
+
     last_daily_scan_date = None
+    failed_daily_at: float | None = None
     try:
         settings = db.get_settings()
         hour, minute = _parse_daily_scan_time(settings.get("daily_scan_time"))
         now = datetime.now()
         target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        # すでに設定時刻を過ぎて起動した場合は、起動時スキャンで本日分を賄ったとみなす
-        if now >= target_today:
+        past_slot = now >= target_today
+        if startup_covers_daily(startup_succeeded=startup_ok, now_past_slot=past_slot):
             last_daily_scan_date = now.date()
             log.info(
-                "Skip daily scan for today (started after %02d:%02d; startup scan covers it)",
+                "起動時スキャンが成功したため、本日 %02d:%02d の定刻スキャンは見送ります",
+                hour,
+                minute,
+            )
+        elif past_slot:
+            log.info(
+                "起動時スキャンでは本日分を賄えていないため、定刻スキャンを実行します (%02d:%02d)",
                 hour,
                 minute,
             )
@@ -167,10 +221,22 @@ def _scheduler_loop() -> None:
             now = datetime.now()
             today = now.date()
             target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-            if now >= target_today and last_daily_scan_date != today:
-                _run_scan_jobs("毎日の自動スキャン")
-                last_daily_scan_date = today
+            past_slot = now >= target_today
+            covered = last_daily_scan_date == today
+            since_failure = None if failed_daily_at is None else time.time() - failed_daily_at
+            if daily_is_due(
+                now_past_slot=past_slot,
+                covered_today=covered,
+                seconds_since_failure=since_failure,
+                retry_sec=DAILY_RETRY_SEC,
+            ):
+                ok = _run_scan_jobs("毎日の自動スキャン", announce=True)
+                if ok:
+                    last_daily_scan_date = today
+                    failed_daily_at = None
+                else:
+                    failed_daily_at = time.time()
+                    log.warning("毎日の自動スキャンに失敗したため、本日分としては数えません")
 
             if last_daily_scan_date == today:
                 next_target = target_today + timedelta(days=1)
@@ -195,22 +261,54 @@ def _run_server() -> None:
         access_log=False,
     )
     server = uvicorn.Server(config)
-    server.run()
+    try:
+        server.run()
+    finally:
+        # ポートを取れなかったのにプロセスとスケジューラだけ残さない
+        if not getattr(server, "started", False) and not _scheduler_stop.is_set():
+            log.error(
+                "ポート %s を使用できません。古いバックエンドが残っている可能性があります。終了します。",
+                PORT,
+            )
+            remove_backend_pid()
+            os._exit(1)
 
 
 def main(headless: bool = False) -> None:
     global _icon
 
     db.init_db()
+    write_backend_pid()
+    try:
+        _main_after_pid(headless)
+    finally:
+        _scheduler_stop.set()
+        remove_backend_pid()
+
+
+def _main_after_pid(headless: bool) -> None:
+    global _icon
     set_status_callback(_update_tray_status)
 
-    server_thread = threading.Thread(target=_run_server, daemon=True)
-    server_thread.start()
+    if not port_is_free(HOST, PORT):
+        log.error(
+            "ポート %s はすでに使用中です。待ち受けできないため終了します。",
+            PORT,
+        )
+        remove_backend_pid()
+        sys.exit(1)
 
-    sched = threading.Thread(target=_scheduler_loop, daemon=True)
+    server_thread = threading.Thread(target=_run_server, daemon=True, name="pchc-api")
+    server_thread.start()
+    if not _wait_until_accepting(30):
+        log.error("ポート %s で待ち受けを開始できなかったため終了します。", PORT)
+        remove_backend_pid()
+        sys.exit(1)
+
+    # 待ち受けできてから起動時スキャンと定刻スキャンを始める
+    sched = threading.Thread(target=_scheduler_loop, daemon=True, name="pchc-scheduler")
     sched.start()
 
-    time.sleep(0.8)
     log.info("%s listening at %s (headless=%s)", APP_NAME, BASE_URL, headless)
 
     if headless:

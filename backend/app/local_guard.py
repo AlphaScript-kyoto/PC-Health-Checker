@@ -10,6 +10,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from app.config import PORT as _LISTEN_PORT
+
 # 開発中の Vite と、配布版（file:// は Origin が "null"）だけを許可する
 ALLOWED_ORIGINS = {
     "null",
@@ -22,7 +24,9 @@ ALLOWED_ORIGINS = {
     "http://localhost:5175",
     "http://localhost:5176",
 }
-ALLOWED_HOSTS = {"127.0.0.1:8787", "localhost:8787"}
+
+# 8787 が使用中のときは Electron が別ポートを渡す。そのポートだけを許可する。
+ALLOWED_HOSTS = {f"127.0.0.1:{_LISTEN_PORT}", f"localhost:{_LISTEN_PORT}"}
 LOOPBACK_CLIENTS = {"127.0.0.1", "::1"}
 TOKEN_HEADER = "x-pchc-token"
 

@@ -81,7 +81,8 @@ export function HomePage({
               {statusJa(String(overall))}
             </span>
             <p className="muted" style={{ margin: 0 }}>
-              {status?.overall_status === 'Unknown' && status?.message
+              {status?.message &&
+              (overall === 'Unknown' || (status.collection_errors || []).length > 0)
                 ? status.message
                 : status?.message && !status?.scanned_at
                   ? status.message

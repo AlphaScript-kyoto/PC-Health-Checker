@@ -185,6 +185,10 @@ export interface StatusPayload {
   elevated?: boolean
   smartctl_available?: boolean
   settings?: AppSettings
+  disk_collection_error?: string
+  volume_collection_error?: string
+  inventory_collection_error?: string
+  collection_errors?: string[]
 }
 
 export interface RecommendationLink {
@@ -217,6 +221,8 @@ export interface AppSettings {
   capacity_preference_tb?: number
   priority?: string
   daily_scan_time?: string
+  /** 0 は毎回。1 以上は、その日数に 1 回だけ自動で容量マップを作る */
+  space_map_interval_days?: number
   startup_enabled?: boolean
   theme?: 'system' | 'light' | 'dark'
   [key: string]: unknown

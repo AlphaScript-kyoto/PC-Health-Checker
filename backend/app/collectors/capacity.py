@@ -5,6 +5,34 @@ import subprocess
 from typing import Any
 
 
+class CapacityCollectionError(RuntimeError):
+    """空き容量の取得に失敗した。空の一覧（問題なし）とは区別する。"""
+
+
+def capacity_error_message(exc: BaseException) -> str:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "空き容量の取得がタイムアウトしました"
+    if isinstance(exc, CapacityCollectionError) and str(exc):
+        return str(exc)
+    return "空き容量の取得に失敗しました"
+
+
+def parse_volume_payload(stdout: str, *, returncode: int = 0) -> Any:
+    """PowerShell の結果を JSON として読む。空文字や壊れた JSON は失敗にする。
+
+    ドライブが無いときはスクリプト側が `[]` を出す。それと、失敗で何も出ない場合を分ける。
+    """
+    if returncode != 0:
+        raise CapacityCollectionError("空き容量の取得に失敗しました")
+    out = (stdout or "").strip()
+    if not out:
+        raise CapacityCollectionError("空き容量の取得に失敗しました")
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise CapacityCollectionError("空き容量の応答を読み取れませんでした") from exc
+
+
 def _run_ps(script: str) -> Any:
     # 日本語ラベルの文字化け防止: PowerShell 出力を UTF-8 に固定
     wrapped = (
@@ -12,28 +40,27 @@ def _run_ps(script: str) -> Any:
         "$OutputEncoding = [Console]::OutputEncoding; "
         + script
     )
-    result = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            wrapped,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=60,
-        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-    )
-    out = (result.stdout or "").strip()
-    if not out:
-        return []
     try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        return []
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                wrapped,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CapacityCollectionError(capacity_error_message(exc)) from exc
+    except OSError as exc:
+        raise CapacityCollectionError("空き容量の取得に失敗しました") from exc
+    return parse_volume_payload(result.stdout or "", returncode=result.returncode)
 
 
 def collect_volumes() -> list[dict[str, Any]]:
@@ -76,7 +103,7 @@ Get-Volume | Where-Object { $_.DriveLetter } | ForEach-Object {
     PhysicalDiskIds = $physIds
   }
 }
-$out | ConvertTo-Json -Compress -Depth 5
+if (-not $out -or $out.Count -eq 0) { '[]' } else { $out | ConvertTo-Json -Compress -Depth 5 }
 """
     data = _run_ps(script)
     if isinstance(data, dict):

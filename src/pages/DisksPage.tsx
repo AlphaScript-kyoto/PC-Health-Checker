@@ -76,7 +76,9 @@ export function DisksPage({ onOpenSpace, showToast }: Props) {
         <h3>物理ディスク</h3>
         {disks.length === 0 ? (
           <p className="muted" style={{ marginTop: 10 }}>
-            ディスク情報がありません。上部の「今すぐスキャン」を試してください。
+            {status?.disk_collection_error
+              ? status.disk_collection_error
+              : 'ディスク情報がありません。上部の「今すぐスキャン」を試してください。'}
           </p>
         ) : (
           <div className="stack" style={{ marginTop: 12, gap: 16 }}>
@@ -104,7 +106,9 @@ export function DisksPage({ onOpenSpace, showToast }: Props) {
         <h3>ボリューム（空き容量）</h3>
         {volumes.length === 0 ? (
           <p className="muted" style={{ marginTop: 10 }}>
-            ボリューム情報がありません。
+            {status?.volume_collection_error
+              ? status.volume_collection_error
+              : 'ボリューム情報がありません。'}
           </p>
         ) : (
           <div className="stack" style={{ marginTop: 8 }}>

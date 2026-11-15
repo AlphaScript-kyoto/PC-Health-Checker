@@ -1,7 +1,19 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+
+def parse_listen_port(value: str | None, default: int = 8787) -> int:
+    """環境変数 PCHC_PORT。空や不正な値は既定の 8787 に戻す。"""
+    text = str(value or "").strip()
+    if not text or not text.isdigit():
+        return default
+    port = int(text)
+    if 1 <= port <= 65535:
+        return port
+    return default
 
 
 def _is_frozen() -> bool:
@@ -30,7 +42,7 @@ APP_CONTACT = ""
 APP_REPO = "https://github.com/AlphaScript-kyoto/PC-Health-Checker"
 
 HOST = "127.0.0.1"
-PORT = 8787
+PORT = parse_listen_port(os.environ.get("PCHC_PORT"))
 BASE_URL = f"http://{HOST}:{PORT}"
 
 APP_DIR = _app_dir()
@@ -55,6 +67,8 @@ DEFAULT_SETTINGS = {
     "capacity_preference_tb": 2.0,
     "priority": "speed",
     "daily_scan_time": "09:00",
+    # 0 = 起動時と毎日のたびに固定ドライブを歩く。1 以上は、その日数に 1 回だけ。
+    "space_map_interval_days": 1,
     "startup_enabled": False,
     "theme": "system",
 }

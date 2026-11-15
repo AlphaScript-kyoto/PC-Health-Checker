@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app import db
-from app.collectors.capacity import collect_volumes
+from app.alert_policy import decide_alert, dedupe_key_for
+from app.collectors.capacity import CapacityCollectionError, collect_volumes
 from app.collectors.disks import (
     DiskCollectionError,
     collect_disks,
@@ -65,6 +66,17 @@ def set_status_callback(cb: Callable[[str], None] | None) -> None:
 
 def get_last_scan() -> dict[str, Any] | None:
     return _last_scan
+
+
+def health_scan_succeeded() -> bool:
+    """健康診断が結果を残せたか。容量マップの見送りや失敗では失敗にしない。"""
+    progress = get_scan_progress()
+    if progress.get("phase") == "cancelled":
+        return False
+    health = progress.get("health") or {}
+    if health.get("running") or health.get("error"):
+        return False
+    return get_last_scan() is not None
 
 
 def get_scan_progress() -> dict[str, Any]:
@@ -135,9 +147,10 @@ def pause_scan() -> dict[str, Any]:
         _resume_event.clear()
         _progress["phase"] = "paused"
         _progress["message"] = "スキャンを中断しています"
-    from app.space_scan import pause_scan as pause_space_scan
+    # 画面の手動マップは止めない。自動で歩いているマップだけ止める。
+    from app.space_scan import pause_auto_scan
 
-    pause_space_scan()
+    pause_auto_scan()
     return {"ok": True, "paused": True}
 
 
@@ -147,9 +160,9 @@ def resume_scan() -> dict[str, Any]:
             return {"ok": False, "message": "再開できるスキャンがありません"}
         _resume_event.set()
         _recompute_overall()
-    from app.space_scan import resume_scan as resume_space_scan
+    from app.space_scan import resume_auto_scan
 
-    resume_space_scan()
+    resume_auto_scan()
     return {"ok": True, "paused": False}
 
 
@@ -157,9 +170,9 @@ def cancel_scan() -> None:
     global _cancel_requested
     _cancel_requested = True
     _resume_event.set()
-    from app.space_scan import cancel_scan as cancel_space_scan
+    from app.space_scan import cancel_auto_scan
 
-    cancel_space_scan()
+    cancel_auto_scan()
 
 
 def _set_health_progress(
@@ -250,7 +263,16 @@ def _set_progress(
 def _collect_all_with_progress() -> dict[str, Any]:
     _checkpoint()
     _set_health_progress(phase="inventory", percent=8, message="PC情報（CPU / メモリ / OS など）を取得中…")
-    inventory = collect_inventory()
+    inventory_error = None
+    try:
+        inventory = collect_inventory()
+    except Exception as exc:
+        log.warning("inventory collection failed: %s", exc)
+        inventory = {}
+        inventory_error = "PC情報の取得に失敗しました"
+    else:
+        if isinstance(inventory, dict) and inventory.get("collection_error"):
+            inventory_error = str(inventory.get("collection_error"))
 
     _checkpoint()
     _set_health_progress(phase="disks", percent=35, message="ディスク情報・SMART を取得中…")
@@ -261,10 +283,24 @@ def _collect_all_with_progress() -> dict[str, Any]:
         log.warning("disk collection failed: %s", exc)
         disks = []
         disk_error = str(exc)
+    except Exception as exc:
+        log.warning("disk collection failed: %s", exc)
+        disks = []
+        disk_error = "ディスク情報の取得に失敗しました"
 
     _checkpoint()
     _set_health_progress(phase="volumes", percent=60, message="ドライブの空き容量を確認中…")
-    volumes = collect_volumes()
+    volume_error = None
+    try:
+        volumes = collect_volumes()
+    except CapacityCollectionError as exc:
+        log.warning("volume collection failed: %s", exc)
+        volumes = []
+        volume_error = str(exc)
+    except Exception as exc:
+        log.warning("volume collection failed: %s", exc)
+        volumes = []
+        volume_error = "空き容量の取得に失敗しました"
     _checkpoint()
 
     elevated = is_elevated()
@@ -299,6 +335,8 @@ def _collect_all_with_progress() -> dict[str, Any]:
         "elevated": elevated,
         "smartctl_available": smartctl_available(),
         "disk_collection_error": disk_error,
+        "volume_collection_error": volume_error,
+        "inventory_collection_error": inventory_error,
     }
 
 
@@ -325,31 +363,35 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
                 changes = db.upsert_known_disks(raw.get("disks") or [])
             evaluated = evaluate(raw, settings)
 
-            for disk in changes.get("appeared") or []:
-                evaluated["alerts"].append(
-                    {
-                        "level": "Watch",
-                        "title": "新しいディスクを検出",
-                        "message": f"{disk.get('model')} (id={disk.get('device_id')})",
-                        "device_id": disk.get("device_id"),
-                        "kind": "change",
-                    }
-                )
-                if evaluated["overall_status"] == "OK":
-                    evaluated["overall_status"] = "Watch"
+            # 初めてディスクを記録する回は、今つながっているもの全部が「新規」に見える。通知しない。
+            if not changes.get("baseline"):
+                for disk in changes.get("appeared") or []:
+                    evaluated["alerts"].append(
+                        {
+                            "level": "Watch",
+                            "title": "新しいディスクを検出",
+                            "message": f"{disk.get('model')} を新しく認識しました",
+                            "device_id": disk.get("device_id"),
+                            "kind": "disk_added",
+                            "target": disk.get("stable_id") or disk.get("device_id"),
+                        }
+                    )
+                    if evaluated["overall_status"] == "OK":
+                        evaluated["overall_status"] = "Watch"
 
-            for disk in changes.get("disappeared") or []:
-                evaluated["alerts"].append(
-                    {
-                        "level": "Watch",
-                        "title": "ディスクが消えました",
-                        "message": f"{disk.get('model')} (id={disk.get('device_id')})",
-                        "device_id": disk.get("device_id"),
-                        "kind": "change",
-                    }
-                )
-                if evaluated["overall_status"] == "OK":
-                    evaluated["overall_status"] = "Watch"
+                for disk in changes.get("disappeared") or []:
+                    evaluated["alerts"].append(
+                        {
+                            "level": "Watch",
+                            "title": "ディスクが消えました",
+                            "message": f"{disk.get('model')} が見つかりません",
+                            "device_id": disk.get("device_id"),
+                            "kind": "disk_removed",
+                            "target": disk.get("stable_id") or disk.get("device_id"),
+                        }
+                    )
+                    if evaluated["overall_status"] == "OK":
+                        evaluated["overall_status"] = "Watch"
 
             recommendations = build_recommendations(evaluated, settings)
             payload = {
@@ -364,30 +406,30 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
             db.save_snapshot(evaluated["overall_status"], payload)
             db.save_disk_history(evaluated.get("disks") or [])
 
-            recent = db.get_recent_alerts(limit=40)
-            recent_keys = {
-                (a.get("level"), a.get("title"), a.get("message")) for a in recent[:15]
-            }
-
+            latest_levels = db.get_latest_alert_levels()
             for alert in evaluated.get("alerts") or []:
-                key = (alert["level"], alert["title"], alert["message"])
+                key = dedupe_key_for(alert)
+                record, level_worsened = decide_alert(alert, latest_levels.get(key))
+                if not record:
+                    continue
                 should_notify = (
                     notify_alerts
                     and settings.get("notify_enabled", True)
-                    and alert.get("level") in ("ReplaceSoon", "Critical", "Watch")
-                    and key not in recent_keys
+                    and level_worsened
                 )
                 ok = False
                 if should_notify:
                     ok = notify(alert["title"], alert["message"])
-                if key not in recent_keys:
-                    db.add_alert(
-                        alert["level"],
-                        alert["title"],
-                        alert["message"],
-                        alert.get("device_id"),
-                        notified=ok,
-                    )
+                db.add_alert(
+                    alert["level"],
+                    alert["title"],
+                    alert["message"],
+                    alert.get("device_id"),
+                    notified=ok,
+                    kind=alert.get("kind"),
+                    dedupe_key=key,
+                )
+                latest_levels[key] = str(alert.get("level") or "")
 
             _last_scan = payload
             if _on_status_change:
@@ -437,7 +479,8 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
 
 
 def _run_space_maps() -> None:
-    from app.space_scan import list_drives, run_scan_blocking
+    from app.space_scan import list_drives, manual_scan_blocks, run_scan_blocking
+    from app.space_schedule import space_map_due
 
     _set_mapping_progress(
         running=True,
@@ -447,19 +490,47 @@ def _run_space_maps() -> None:
     )
     try:
         _checkpoint()
-        drives = list_drives()
-        if not drives:
+        settings = db.get_settings()
+        try:
+            interval = int(settings.get("space_map_interval_days", 1))
+        except (TypeError, ValueError):
+            interval = 1
+        if not space_map_due(
+            db.get_meta("last_auto_space_map"),
+            interval,
+            now=datetime.now(timezone.utc),
+        ):
             _set_mapping_progress(
                 percent=100,
-                message="マッピング対象のドライブがありません",
+                message="容量マップは設定した間隔のため、今回は見送りました",
+                finished=True,
+            )
+            return
+
+        # 起動時・毎日の自動分は固定ドライブだけ。USB メモリなどは手動スキャンで見る。
+        drives = list_drives(fixed_only=True)
+        if not drives:
+            db.set_meta("last_auto_space_map", datetime.now(timezone.utc).isoformat())
+            _set_mapping_progress(
+                percent=100,
+                message="マッピング対象の固定ドライブがありません",
                 finished=True,
             )
             return
         total = len(drives)
+        skipped_busy = False
         for index, drive in enumerate(drives):
             _checkpoint()
             letter = drive.get("letter") or "?"
             root = drive.get("rootPath") or f"{letter}:\\"
+            if manual_scan_blocks(root):
+                skipped_busy = True
+                log.info("skip auto space map %s; a manual scan is using it", letter)
+                _set_mapping_progress(
+                    message=f"{letter}: は手動スキャン中のため、自動では歩きません",
+                    current_drive=f"{letter}:",
+                )
+                continue
             used_bytes = max(0, int(drive.get("usedBytes") or 0))
             # このドライブが担当する進捗レンジ（例: 1本なら 5〜95）
             span_start = 5 + int((index / max(total, 1)) * 90)
@@ -518,9 +589,17 @@ def _run_space_maps() -> None:
                 current_drive=f"{letter}:",
             )
         _checkpoint()
+        # 手動スキャンとぶつかって見送ったドライブがあるときは、次回もう一度歩く
+        if not skipped_busy:
+            db.set_meta("last_auto_space_map", datetime.now(timezone.utc).isoformat())
+        done_message = (
+            "一部のドライブは手動スキャン中のため見送りました"
+            if skipped_busy
+            else "容量マップの作成が完了しました"
+        )
         _set_mapping_progress(
             percent=100,
-            message="容量マップの作成が完了しました",
+            message=done_message,
             finished=True,
         )
     except ScanCancelled:

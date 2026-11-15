@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   getAbout,
+  getHealth,
   getScanProgress,
   getSettings,
   getStatus,
@@ -227,17 +228,72 @@ export default function App() {
     }
   }, [monitorScan, showToast])
 
-  // 起動時は必ず健康診断スキャンを実行。
+  // 起動時スキャンはバックエンドが健康になってから付ける。
+  // 1.2秒固定だと、配布版でバックエンドが遅れたとき POST が失敗してスキャンが消える。
   // 開発時の StrictMode は Effect を一度片付けてからもう一度走らせる。
-  // 先に「開始済み」にしてしまうと、片付けで消したタイマーが二度目に戻らない。
   const runScanRef = useRef(runScan)
   runScanRef.current = runScan
+  const monitorScanRef = useRef(monitorScan)
+  monitorScanRef.current = monitorScan
+  const showToastRef = useRef(showToast)
+  showToastRef.current = showToast
   useEffect(() => {
+    let cancelled = false
     const timer = window.setTimeout(() => {
-      void runScanRef.current()
-    }, 1200)
-    return () => window.clearTimeout(timer)
-  }, [])
+      void (async () => {
+        const deadline = Date.now() + 60_000
+        let healthy = false
+        while (!cancelled && Date.now() < deadline) {
+          try {
+            const health = await getHealth()
+            if (health?.status === 'ok') {
+              healthy = true
+              break
+            }
+          } catch {
+            // まだ待ち受けていない
+          }
+          await new Promise((r) => window.setTimeout(r, 500))
+        }
+        if (cancelled || !healthy) return
+
+        // バックエンド自身が起動時スキャンを始めるのを、少しだけ待つ
+        for (let i = 0; i < 15 && !cancelled; i += 1) {
+          try {
+            const progress = await getScanProgress()
+            if (cancelled) return
+            if (progress.running) {
+              const session = ++scanSession.current
+              setScanning(true)
+              setScanProgress(progress)
+              showToastRef.current('起動時スキャンを開始しました…')
+              await monitorScanRef.current(session)
+              return
+            }
+            if (
+              !progress.running &&
+              progress.phase === 'done' &&
+              progress.finished_at &&
+              Date.now() - Date.parse(progress.finished_at) < 3 * 60 * 1000
+            ) {
+              setRefreshKey((k) => k + 1)
+              await refreshLastScan()
+              showToastRef.current('起動時スキャンが完了しました')
+              return
+            }
+          } catch {
+            // 次の確認まで待つ
+          }
+          await new Promise((r) => window.setTimeout(r, 400))
+        }
+        if (!cancelled) await runScanRef.current()
+      })()
+    }, 300)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [refreshLastScan])
 
   // バックエンドの毎日スキャンなど、UI外で走った結果を取り込む。
   // scanning を依存に入れると、検知した瞬間の setScanning でこの Effect が止まり、監視が続かない。
