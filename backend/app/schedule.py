@@ -15,6 +15,28 @@ def startup_covers_daily(*, startup_succeeded: bool, now_past_slot: bool) -> boo
     return bool(startup_succeeded and now_past_slot)
 
 
+def classify_scan_outcome(
+    *,
+    phase: str,
+    health_running: bool,
+    health_error: bool,
+    has_result: bool,
+) -> str:
+    """ok / cancelled / failed。中断は失敗と分け、すぐ定刻スキャンをやり直さない。"""
+    if phase == "cancelled":
+        return "cancelled"
+    if health_running or health_error:
+        return "failed"
+    if has_result:
+        return "ok"
+    return "failed"
+
+
+def startup_should_delay_daily(outcome: str) -> bool:
+    """利用者が止めた起動時スキャンの直後に、定刻スキャンを重ねない。"""
+    return outcome == "cancelled"
+
+
 def daily_is_due(
     *,
     now_past_slot: bool,

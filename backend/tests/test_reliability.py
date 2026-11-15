@@ -9,7 +9,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.alert_policy import decide_alert, dedupe_key_for
+from app.alert_policy import decide_alert, dedupe_key_for, keys_to_resolve, legacy_dedupe_key
 from app.collectors.capacity import CapacityCollectionError, parse_volume_payload
 from app.collectors.disks import DiskCollectionError, ensure_disk_rows
 from app.collectors.inventory import inventory_error_message
@@ -17,7 +17,12 @@ from app.config import parse_listen_port
 from app.disk_identity import disk_stable_id
 from app.engine.risk import evaluate
 from app.net_bind import port_is_free
-from app.schedule import daily_is_due, startup_covers_daily
+from app.schedule import (
+    classify_scan_outcome,
+    daily_is_due,
+    startup_covers_daily,
+    startup_should_delay_daily,
+)
 from app.space_schedule import space_map_due
 from app.space_scan import drive_type_included
 
@@ -60,9 +65,31 @@ class AlertPolicyTests(unittest.TestCase):
             "target": "C:",
         }
         self.assertEqual(dedupe_key_for(previous), dedupe_key_for(current))
-        record, notify = decide_alert(current, "Watch")
+        record, notify = decide_alert(current, "Watch", previous["message"])
         self.assertFalse(record)
         self.assertFalse(notify)
+
+    def test_same_level_new_reason_kind_notifies_once(self) -> None:
+        record, notify = decide_alert(
+            {"level": "Watch", "kind": "disk", "target": "x", "message": "SSD摩耗度: 91%"},
+            "Watch",
+            "温度高め: 61°C",
+        )
+        self.assertTrue(record)
+        self.assertTrue(notify)
+
+    def test_resolved_key_can_notify_again_at_the_same_level(self) -> None:
+        self.assertEqual(keys_to_resolve({"capacity|C:": "Watch", "disk|sn:1": "OK"}, set()), ["capacity|C:"])
+        record, notify = decide_alert(
+            {"level": "Watch", "kind": "capacity", "target": "C:", "message": "空き 9%"},
+            "OK",
+            "前回までの注意は、今回のスキャンでは見当たりませんでした。",
+        )
+        self.assertTrue(record)
+        self.assertTrue(notify)
+
+    def test_legacy_capacity_title_gets_a_stable_key(self) -> None:
+        self.assertEqual(legacy_dedupe_key("容量不足: C:", None), ("capacity", "capacity|C:"))
 
     def test_notify_only_when_level_worsens(self) -> None:
         alert = {"level": "Critical", "kind": "disk", "target": "sn:ABC|mdl:TEST"}
@@ -209,6 +236,51 @@ class KnownDiskTests(unittest.TestCase):
         self.assertEqual(changes["appeared"], [])
         self.assertEqual(changes["disappeared"], [])
 
+    def test_identical_disks_without_serial_keep_ids_when_numbers_swap(self) -> None:
+        def plain(number: str) -> dict:
+            return {
+                "device_id": number,
+                "model": "Bar",
+                "serial": "",
+                "size_bytes": 100,
+                "bus_type": "SATA",
+                "media_type": "HDD",
+            }
+
+        self.db.upsert_known_disks([plain("0"), plain("1")])
+        changes = self.db.upsert_known_disks([plain("1"), plain("0")])
+        self.assertEqual(changes["appeared"], [])
+        self.assertEqual(changes["disappeared"], [])
+
+    def test_serial_id_does_not_fall_back_to_pnp_when_serial_disappears(self) -> None:
+        base = {
+            "device_id": "0",
+            "model": "Foo",
+            "serial": "",
+            "pnp_device_id": r"USB\VID\ABC",
+        }
+        self.db.upsert_known_disks([base])
+        self.db.upsert_known_disks([{**base, "serial": "S1"}])
+        changes = self.db.upsert_known_disks([base])
+        self.assertEqual(changes["appeared"], [])
+        self.assertEqual(changes["disappeared"], [])
+        with self.db.connect() as conn:
+            stored = [str(row["device_id"]) for row in conn.execute("SELECT device_id FROM known_disks")]
+        self.assertEqual(stored, [stored[0]])
+        self.assertEqual(len(stored), 1)
+        self.assertTrue(stored[0].startswith("sn:"))
+
+    def test_old_alerts_without_keys_are_backfilled(self) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO alerts (created_at, level, title, message, device_id, notified)
+                VALUES ('2026-11-15T00:00:00+00:00', 'Watch', '容量不足: C:', '空き 9%', NULL, 1)
+                """
+            )
+        self.db.init_db()
+        self.assertEqual(self.db.get_latest_alert_levels().get("capacity|C:"), "Watch")
+
     def test_same_message_does_not_duplicate_alert_rows(self) -> None:
         alert = {
             "level": "Watch",
@@ -323,6 +395,29 @@ class CollectionFailureTests(unittest.TestCase):
 
 
 class ScheduleAndPortTests(unittest.TestCase):
+    def test_cancelled_startup_waits_before_the_daily_scan(self) -> None:
+        self.assertEqual(
+            classify_scan_outcome(
+                phase="cancelled",
+                health_running=False,
+                health_error=False,
+                has_result=True,
+            ),
+            "cancelled",
+        )
+        self.assertEqual(
+            classify_scan_outcome(
+                phase="error",
+                health_running=False,
+                health_error=True,
+                has_result=False,
+            ),
+            "failed",
+        )
+        self.assertTrue(startup_should_delay_daily("cancelled"))
+        self.assertFalse(startup_should_delay_daily("failed"))
+        self.assertFalse(startup_should_delay_daily("ok"))
+
     def test_failed_startup_does_not_cover_the_daily_slot(self) -> None:
         self.assertFalse(startup_covers_daily(startup_succeeded=False, now_past_slot=True))
         self.assertTrue(startup_covers_daily(startup_succeeded=True, now_past_slot=True))
@@ -362,12 +457,22 @@ class ScheduleAndPortTests(unittest.TestCase):
 
     def test_space_map_interval_and_fixed_drives_only(self) -> None:
         now = datetime(2026, 11, 15, 12, 0, tzinfo=timezone.utc)
-        self.assertTrue(space_map_due(None, 1, now=now))
-        self.assertTrue(space_map_due(now.isoformat(), 0, now=now))
+        self.assertTrue(space_map_due(None, 1, now=now, tz=timezone.utc))
+        self.assertTrue(space_map_due(now.isoformat(), 0, now=now, tz=timezone.utc))
         recent = (now - timedelta(hours=2)).isoformat()
-        self.assertFalse(space_map_due(recent, 1, now=now))
-        old = (now - timedelta(days=1, minutes=1)).isoformat()
-        self.assertTrue(space_map_due(old, 1, now=now))
+        self.assertFalse(space_map_due(recent, 1, now=now, tz=timezone.utc))
+        # 前日の同時刻より少し前。24時間未満でも、日付が変わっていれば実施する。
+        yesterday = datetime(2026, 11, 14, 9, 30, tzinfo=timezone.utc)
+        morning = datetime(2026, 11, 15, 9, 0, tzinfo=timezone.utc)
+        self.assertTrue(space_map_due(yesterday.isoformat(), 1, now=morning, tz=timezone.utc))
+        self.assertFalse(
+            space_map_due(
+                datetime(2026, 11, 15, 8, 0, tzinfo=timezone.utc).isoformat(),
+                1,
+                now=morning,
+                tz=timezone.utc,
+            )
+        )
         self.assertTrue(drive_type_included(3, fixed_only=True))
         self.assertFalse(drive_type_included(2, fixed_only=True))
         self.assertTrue(drive_type_included(2, fixed_only=False))

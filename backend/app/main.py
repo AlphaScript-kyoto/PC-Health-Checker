@@ -23,8 +23,13 @@ from app import db
 from app.api import app as fastapi_app, mount_ui
 from app.config import APP_NAME, BASE_URL, DATA_DIR, HOST, PORT, SCAN_INTERVAL_SEC
 from app.net_bind import port_is_free
-from app.scanner import health_scan_succeeded, run_scan, set_status_callback
-from app.schedule import DAILY_RETRY_SEC, daily_is_due, startup_covers_daily
+from app.scanner import run_scan, scan_outcome, set_status_callback
+from app.schedule import (
+    DAILY_RETRY_SEC,
+    daily_is_due,
+    startup_covers_daily,
+    startup_should_delay_daily,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -128,8 +133,8 @@ def _wait_until_accepting(timeout_sec: float) -> bool:
     return False
 
 
-def _run_scan_jobs(label: str, *, announce: bool) -> bool:
-    """健康診断を走らせ、成功したときだけ True。失敗を「今日は済んだ」にしない。"""
+def _run_scan_jobs(label: str, *, announce: bool) -> str:
+    """ok / cancelled / failed。失敗や中断を「今日は済んだ」にしない。"""
     from app.notify import notify
     from app.scanner import get_last_scan, get_scan_progress, start_scan
 
@@ -140,7 +145,7 @@ def _run_scan_jobs(label: str, *, announce: bool) -> bool:
             log.info("%s: another scan is already running — waiting for it", label)
         else:
             log.warning("%s: could not start (%s)", label, started)
-            return False
+            return "failed"
 
     deadline = time.time() + 60 * 45
     while time.time() < deadline and not _scheduler_stop.is_set():
@@ -151,17 +156,17 @@ def _run_scan_jobs(label: str, *, announce: bool) -> bool:
     else:
         if not _scheduler_stop.is_set():
             log.warning("%s: timed out waiting for scan to finish", label)
-            return False
+            return "failed"
 
-    ok = health_scan_succeeded()
+    outcome = scan_outcome()
     last = None
     try:
         last = get_last_scan()
     except Exception:
         pass
-    log.info("%s finished: ok=%s status=%s", label, ok, (last or {}).get("overall_status"))
-    if not ok:
-        return False
+    log.info("%s finished: outcome=%s status=%s", label, outcome, (last or {}).get("overall_status"))
+    if outcome != "ok":
+        return outcome
 
     try:
         from app.price_tracker import maybe_weekly_price_job
@@ -175,18 +180,19 @@ def _run_scan_jobs(label: str, *, announce: bool) -> bool:
             notify(APP_NAME, f"{label}が完了しました", open_dashboard=False)
         except Exception:
             log.exception("Daily scan notify failed")
-    return True
+    return "ok"
 
 
 def _scheduler_loop() -> None:
     """待ち受けのあと起動時スキャンを行い、成功したときだけ定刻分を済ませる。"""
     from datetime import datetime, timedelta
 
-    startup_ok = False
+    startup_outcome = "failed"
     try:
-        startup_ok = _run_scan_jobs("起動時スキャン", announce=False)
+        startup_outcome = _run_scan_jobs("起動時スキャン", announce=False)
     except Exception:
         log.exception("Startup scan failed")
+        startup_outcome = "failed"
 
     last_daily_scan_date = None
     failed_daily_at: float | None = None
@@ -196,12 +202,22 @@ def _scheduler_loop() -> None:
         now = datetime.now()
         target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         past_slot = now >= target_today
-        if startup_covers_daily(startup_succeeded=startup_ok, now_past_slot=past_slot):
+        if startup_covers_daily(
+            startup_succeeded=startup_outcome == "ok",
+            now_past_slot=past_slot,
+        ):
             last_daily_scan_date = now.date()
             log.info(
                 "起動時スキャンが成功したため、本日 %02d:%02d の定刻スキャンは見送ります",
                 hour,
                 minute,
+            )
+        elif startup_should_delay_daily(startup_outcome):
+            # 利用者が止めた直後に、定刻分としてもう一度歩き始めない
+            failed_daily_at = time.time()
+            log.info(
+                "起動時スキャンは中断されたため、定刻スキャンは約%d分待ってから判断します",
+                DAILY_RETRY_SEC // 60,
             )
         elif past_slot:
             log.info(
@@ -230,7 +246,7 @@ def _scheduler_loop() -> None:
                 seconds_since_failure=since_failure,
                 retry_sec=DAILY_RETRY_SEC,
             ):
-                ok = _run_scan_jobs("毎日の自動スキャン", announce=True)
+                ok = _run_scan_jobs("毎日の自動スキャン", announce=True) == "ok"
                 if ok:
                     last_daily_scan_date = today
                     failed_daily_at = None
@@ -278,7 +294,6 @@ def main(headless: bool = False) -> None:
     global _icon
 
     db.init_db()
-    write_backend_pid()
     try:
         _main_after_pid(headless)
     finally:
@@ -295,16 +310,16 @@ def _main_after_pid(headless: bool) -> None:
             "ポート %s はすでに使用中です。待ち受けできないため終了します。",
             PORT,
         )
-        remove_backend_pid()
         sys.exit(1)
 
     server_thread = threading.Thread(target=_run_server, daemon=True, name="pchc-api")
     server_thread.start()
     if not _wait_until_accepting(30):
         log.error("ポート %s で待ち受けを開始できなかったため終了します。", PORT)
-        remove_backend_pid()
         sys.exit(1)
 
+    # 待ち受けに成功してから PID を書く。失敗時に、動いている古いバックエンドの PID を消さない。
+    write_backend_pid()
     # 待ち受けできてから起動時スキャンと定刻スキャンを始める
     sched = threading.Thread(target=_scheduler_loop, daemon=True, name="pchc-scheduler")
     sched.start()

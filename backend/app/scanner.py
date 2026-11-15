@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app import db
-from app.alert_policy import decide_alert, dedupe_key_for
+from app.alert_policy import decide_alert, dedupe_key_for, keys_to_resolve
 from app.collectors.capacity import CapacityCollectionError, collect_volumes
 from app.collectors.disks import (
     DiskCollectionError,
@@ -68,15 +68,23 @@ def get_last_scan() -> dict[str, Any] | None:
     return _last_scan
 
 
+def scan_outcome() -> str:
+    """ok / cancelled / failed。容量マップの見送りは、健康診断が残っていれば ok。"""
+    from app.schedule import classify_scan_outcome
+
+    progress = get_scan_progress()
+    health = progress.get("health") or {}
+    return classify_scan_outcome(
+        phase=str(progress.get("phase") or ""),
+        health_running=bool(health.get("running")),
+        health_error=bool(health.get("error")),
+        has_result=get_last_scan() is not None,
+    )
+
+
 def health_scan_succeeded() -> bool:
     """健康診断が結果を残せたか。容量マップの見送りや失敗では失敗にしない。"""
-    progress = get_scan_progress()
-    if progress.get("phase") == "cancelled":
-        return False
-    health = progress.get("health") or {}
-    if health.get("running") or health.get("error"):
-        return False
-    return get_last_scan() is not None
+    return scan_outcome() == "ok"
 
 
 def get_scan_progress() -> dict[str, Any]:
@@ -406,10 +414,17 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
             db.save_snapshot(evaluated["overall_status"], payload)
             db.save_disk_history(evaluated.get("disks") or [])
 
-            latest_levels = db.get_latest_alert_levels()
+            latest_states = db.get_latest_alert_states()
+            seen_keys: set[str] = set()
             for alert in evaluated.get("alerts") or []:
                 key = dedupe_key_for(alert)
-                record, level_worsened = decide_alert(alert, latest_levels.get(key))
+                seen_keys.add(key)
+                previous = latest_states.get(key) or {}
+                record, level_worsened = decide_alert(
+                    alert,
+                    previous.get("level"),
+                    previous.get("message"),
+                )
                 if not record:
                     continue
                 should_notify = (
@@ -429,7 +444,23 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
                     kind=alert.get("kind"),
                     dedupe_key=key,
                 )
-                latest_levels[key] = str(alert.get("level") or "")
+                latest_states[key] = {
+                    "level": str(alert.get("level") or ""),
+                    "message": str(alert.get("message") or ""),
+                }
+            # 今回出なかった注意は解消として OK を残す。残したままだと、数週間後の再発を知らせられない。
+            previous_levels = {key: state.get("level", "") for key, state in latest_states.items()}
+            for key in keys_to_resolve(previous_levels, seen_keys):
+                kind = key.split("|", 1)[0] or "other"
+                db.add_alert(
+                    "OK",
+                    "注意は解消しました",
+                    "前回までの注意は、今回のスキャンでは見当たりませんでした。",
+                    None,
+                    notified=False,
+                    kind=kind,
+                    dedupe_key=key,
+                )
 
             _last_scan = payload
             if _on_status_change:

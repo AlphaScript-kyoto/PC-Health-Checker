@@ -69,6 +69,7 @@ def init_db() -> None:
                 device_id TEXT PRIMARY KEY,
                 model TEXT,
                 serial TEXT,
+                pnp_id TEXT,
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL
             );
@@ -113,6 +114,8 @@ def init_db() -> None:
             """
         )
         _ensure_alert_columns(conn)
+        _ensure_known_disk_columns(conn)
+        _backfill_alert_keys(conn)
         _ensure_default_settings(conn)
         _purge_expired(conn)
 
@@ -127,6 +130,33 @@ def _ensure_alert_columns(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_alerts_dedupe_key ON alerts (dedupe_key, id)"
     )
+
+
+def _ensure_known_disk_columns(conn: sqlite3.Connection) -> None:
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(known_disks)").fetchall()}
+    if "pnp_id" not in cols:
+        conn.execute("ALTER TABLE known_disks ADD COLUMN pnp_id TEXT")
+
+
+def _backfill_alert_keys(conn: sqlite3.Connection) -> None:
+    """安定キーが無い古い通知に、分かる範囲でキーを付ける。全部を一度に再通知しないため。"""
+    from app.alert_policy import legacy_dedupe_key
+
+    rows = conn.execute(
+        """
+        SELECT id, title, device_id FROM alerts
+        WHERE dedupe_key IS NULL OR dedupe_key = ''
+        """
+    ).fetchall()
+    for row in rows:
+        guessed = legacy_dedupe_key(row["title"], row["device_id"])
+        if not guessed:
+            continue
+        kind, key = guessed
+        conn.execute(
+            "UPDATE alerts SET kind = COALESCE(kind, ?), dedupe_key = ? WHERE id = ?",
+            (kind, key, row["id"]),
+        )
 
 
 def _ensure_default_settings(conn: sqlite3.Connection) -> None:
@@ -298,12 +328,11 @@ def get_recent_alerts(limit: int = 30) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def get_latest_alert_levels() -> dict[str, str]:
-    """安定キーごとの、いちばん新しい危険度。"""
+def _latest_alert_rows() -> list[dict[str, str]]:
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT a.dedupe_key, a.level
+            SELECT a.dedupe_key, a.level, a.message
             FROM alerts a
             INNER JOIN (
                 SELECT dedupe_key, MAX(id) AS max_id
@@ -313,7 +342,30 @@ def get_latest_alert_levels() -> dict[str, str]:
             ) m ON a.id = m.max_id
             """
         ).fetchall()
-    return {str(row["dedupe_key"]): str(row["level"]) for row in rows}
+        return [
+            {
+                "dedupe_key": str(row["dedupe_key"] or ""),
+                "level": str(row["level"] or ""),
+                "message": str(row["message"] or ""),
+            }
+            for row in rows
+        ]
+
+
+def get_latest_alert_levels() -> dict[str, str]:
+    """安定キーごとの、いちばん新しい危険度。"""
+    return {str(row["dedupe_key"]): str(row["level"]) for row in _latest_alert_rows()}
+
+
+def get_latest_alert_states() -> dict[str, dict[str, str]]:
+    """安定キーごとの、いちばん新しい危険度と本文。"""
+    return {
+        str(row["dedupe_key"]): {
+            "level": str(row["level"] or ""),
+            "message": str(row["message"] or ""),
+        }
+        for row in _latest_alert_rows()
+    }
 
 
 def _rekey_known_disk(
@@ -323,15 +375,18 @@ def _rekey_known_disk(
     disk: dict[str, Any],
     first_seen: str,
     now: str,
+    pnp_id: str | None,
 ) -> None:
+    serial = disk.get("serial")
+    model = disk.get("model")
     if old_pk == new_id:
         conn.execute(
             """
             UPDATE known_disks
-            SET model = ?, serial = ?, last_seen = ?
+            SET model = ?, serial = ?, pnp_id = ?, last_seen = ?
             WHERE device_id = ?
             """,
-            (disk.get("model"), disk.get("serial"), now, new_id),
+            (model, serial, pnp_id, now, new_id),
         )
         return
     existing = conn.execute(
@@ -344,10 +399,10 @@ def _rekey_known_disk(
         conn.execute("DELETE FROM known_disks WHERE device_id = ?", (new_id,))
     conn.execute(
         """
-        INSERT INTO known_disks (device_id, model, serial, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO known_disks (device_id, model, serial, pnp_id, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (new_id, disk.get("model"), disk.get("serial"), kept_first, now),
+        (new_id, model, serial, pnp_id, kept_first, now),
     )
     conn.execute("DELETE FROM known_disks WHERE device_id = ?", (old_pk,))
     conn.execute(
@@ -400,8 +455,11 @@ def upsert_known_disks(disks: list[dict[str, Any]]) -> dict[str, list[dict[str, 
     """個体IDで出現・消滅を追跡する。記録が空の初回はベースラインで、新規通知は出さない。"""
     from app.disk_identity import (
         STABLE_PREFIXES,
-        disk_stable_id,
+        assign_collision_ids,
+        candidate_identities,
+        choose_stored_id,
         identity_from_known_row,
+        normalized_pnp,
         serial_usable,
     )
 
@@ -412,6 +470,7 @@ def upsert_known_disks(disks: list[dict[str, Any]]) -> dict[str, list[dict[str, 
     with connect() as conn:
         rows = [dict(row) for row in conn.execute("SELECT * FROM known_disks").fetchall()]
         baseline = len(rows) == 0
+        assign_collision_ids(disks, rows)
         # シリアルの無い昔の番号行は、ここで潰すと別の個体と衝突する。モデルが一意なときだけ引き継ぐ。
         by_identity: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -420,32 +479,53 @@ def upsert_known_disks(disks: list[dict[str, Any]]) -> dict[str, list[dict[str, 
                 by_identity[device_id] = row
             elif serial_usable(row.get("serial")):
                 by_identity[identity_from_known_row(row)] = row
+            pnp_id = str(row.get("pnp_id") or "")
+            if pnp_id:
+                by_identity.setdefault(f"pnp:{pnp_id}", row)
         consumed: set[str] = set()
         seen: set[str] = set()
 
         for disk in disks:
-            ident = str(disk.get("stable_id") or disk_stable_id(disk))
-            if ident in seen:
-                # シリアルの無い同型が複数あるとき、番号で区別して履歴を混ぜない
-                ident = f"{ident}|n:{disk.get('device_id') or len(seen)}"
-            seen.add(ident)
-            disk["stable_id"] = ident
-            row = by_identity.get(ident)
+            candidates = candidate_identities(disk)
+            best = candidates[0]
+            paired = str(disk.pop("_paired_id", "") or "")
+            row = by_identity.get(paired) if paired else None
+            if row is not None and str(row.get("device_id") or "") in consumed:
+                row = None
+            if row is None:
+                for key in candidates:
+                    found = by_identity.get(key)
+                    if found is not None and str(found.get("device_id") or "") not in consumed:
+                        row = found
+                        break
             if row is None:
                 row = _adopt_legacy_row(disk, rows, consumed)
+            pnp_id = normalized_pnp(disk) or None
             if row is None:
+                ident = paired or best
+                if ident in seen:
+                    ident = f"{best}|n:{len(seen)}"
+                seen.add(ident)
+                disk["stable_id"] = ident
                 conn.execute(
                     """
-                    INSERT INTO known_disks (device_id, model, serial, first_seen, last_seen)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO known_disks
+                    (device_id, model, serial, pnp_id, first_seen, last_seen)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (ident, disk.get("model"), disk.get("serial"), now, now),
+                    (ident, disk.get("model"), disk.get("serial"), pnp_id, now, now),
                 )
                 if not baseline:
                     appeared.append(disk)
                 continue
 
             old_pk = str(row.get("device_id") or "")
+            # 同型の対応づけは、その行の ID を維持する。シリアルが弱い情報に戻っても ID は下げない。
+            ident = paired or choose_stored_id(best, old_pk)
+            if ident in seen and ident != old_pk:
+                ident = old_pk
+            seen.add(ident)
+            disk["stable_id"] = ident
             consumed.add(old_pk)
             _rekey_known_disk(
                 conn,
@@ -454,6 +534,7 @@ def upsert_known_disks(disks: list[dict[str, Any]]) -> dict[str, list[dict[str, 
                 disk,
                 str(row.get("first_seen") or now),
                 now,
+                pnp_id or (str(row.get("pnp_id") or "") or None),
             )
 
         if not baseline:

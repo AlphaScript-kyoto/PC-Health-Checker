@@ -9,7 +9,7 @@ import {
   Notification,
   dialog,
 } from 'electron'
-import { spawn, execSync, execFile, execFileSync, type ChildProcess } from 'node:child_process'
+import { spawn, execSync, execFile, type ChildProcess } from 'node:child_process'
 import crypto from 'node:crypto'
 import { promisify } from 'node:util'
 import fs from 'node:fs'
@@ -80,6 +80,8 @@ const ROOT = app.isPackaged ? app.getAppPath() : path.join(__dirname, '..')
 }
 
 let mainWindow: BrowserWindow | null = null
+/** 起動待ちが終わるまでは、二重起動でウィンドウを増やさない */
+let startupSettled = false
 const diskDetailWindows = new Map<string, BrowserWindow>()
 let tray: Tray | null = null
 let pyProc: ChildProcess | null = null
@@ -185,22 +187,56 @@ function readBackendPids(): number[] {
   return pids
 }
 
-function processCommandLine(pid: number): string {
+function backendCommandNeedles(): string[] {
+  // このアプリのバックエンドの絶対パスだけ。`app.main` だけでは他の FastAPI を巻き込まない。
+  if (app.isPackaged) {
+    return [path.join(process.resourcesPath, 'backend', 'pc-health-backend.exe')]
+  }
+  return [path.join(ROOT, 'backend')]
+}
+
+function commandMatchesOurBackend(command: string, needles: string[]): boolean {
+  const normalized = command.replace(/\//g, '\\').toLowerCase()
+  return needles.some((needle) => {
+    const folded = needle.replace(/\//g, '\\').toLowerCase()
+    return folded.length > 0 && normalized.includes(folded)
+  })
+}
+
+/** ポートを掴んでいて、PID ファイルと一致し、このアプリのパスで、識別 API も同じ PID のときだけ止めてよい。 */
+function mayKillStaleBackend(input: {
+  pid: number
+  selfPid: number
+  listening: number[]
+  pidFile: number[]
+  command: string
+  needles: string[]
+  identity: { name: string; pid: number } | null
+}): boolean {
+  if (!input.pid || input.pid === input.selfPid) return false
+  if (!input.listening.includes(input.pid)) return false
+  if (!input.pidFile.includes(input.pid)) return false
+  if (!commandMatchesOurBackend(input.command, input.needles)) return false
+  if (!input.identity || input.identity.pid !== input.pid) return false
+  if (input.identity.name !== APP_TITLE) return false
+  return true
+}
+
+async function processCommandLine(pid: number): Promise<string> {
   if (!Number.isInteger(pid) || pid <= 0) return ''
   if (process.platform === 'win32') {
     try {
-      return String(
-        execFileSync(
-          'powershell.exe',
-          [
-            '-NoProfile',
-            '-NonInteractive',
-            '-Command',
-            `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
-          ],
-          { encoding: 'utf8', timeout: 8000, windowsHide: true },
-        ) || '',
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+        ],
+        { encoding: 'utf8', timeout: 8000, windowsHide: true },
       )
+      return String(stdout || '')
     } catch {
       return ''
     }
@@ -212,11 +248,16 @@ function processCommandLine(pid: number): string {
   }
 }
 
-function listeningPids(port: number): number[] {
+async function listeningPids(port: number): Promise<number[]> {
   if (process.platform !== 'win32') return []
   let output = ''
   try {
-    output = execSync('netstat -ano -p tcp', { encoding: 'utf8' })
+    const { stdout } = await execFileAsync('netstat', ['-ano', '-p', 'tcp'], {
+      encoding: 'utf8',
+      timeout: 8000,
+      windowsHide: true,
+    })
+    output = String(stdout || '')
   } catch {
     return []
   }
@@ -231,26 +272,32 @@ function listeningPids(port: number): number[] {
   return [...pids]
 }
 
-function isStaleBackend(pid: number): boolean {
-  if (!pid || pid === process.pid) return false
-  if (readBackendPids().includes(pid)) return true
-  const command = processCommandLine(pid).toLowerCase()
-  if (!command) return false
-  return command.includes('pc-health-backend') || command.includes('app.main')
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
 }
 
-function sleepMs(ms: number) {
-  const view = new Int32Array(new SharedArrayBuffer(4))
-  Atomics.wait(view, 0, 0, ms)
-}
-
-function waitUntilPortFree(port: number, timeoutMs: number): boolean {
+async function waitUntilPortFree(port: number, timeoutMs: number): Promise<boolean> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
-    if (listeningPids(port).length === 0) return true
-    sleepMs(200)
+    if ((await listeningPids(port)).length === 0) return true
+    await sleepMs(200)
   }
-  return listeningPids(port).length === 0
+  return (await listeningPids(port)).length === 0
+}
+
+async function killProcessTreeAsync(pid: number): Promise<void> {
+  if (!pid || pid === process.pid) return
+  try {
+    if (process.platform === 'win32') {
+      await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true })
+    } else {
+      process.kill(pid, 'SIGTERM')
+    }
+  } catch {
+    // すでに終了している
+  }
 }
 
 function findFreePort(): Promise<number> {
@@ -285,19 +332,74 @@ function portResponds(port: number): Promise<boolean> {
   })
 }
 
+function readRemoteIdentity(port: number): Promise<{ name: string; pid: number } | null> {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { hostname: HOST, port, path: '/api/identity', timeout: 800 },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            resolve(null)
+            return
+          }
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+              name?: unknown
+              pid?: unknown
+            }
+            const pid = Number(body.pid)
+            const name = String(body.name || '')
+            if (!name || !Number.isInteger(pid) || pid <= 0) {
+              resolve(null)
+              return
+            }
+            resolve({ name, pid })
+          } catch {
+            resolve(null)
+          }
+        })
+      },
+    )
+    req.on('error', () => resolve(null))
+    req.on('timeout', () => {
+      req.destroy()
+      resolve(null)
+    })
+  })
+}
+
 /** 8787 にこのアプリの古いバックエンドが残っていたら止める。他人のプロセスなら別ポートを使う。 */
 async function prepareBackendPort(): Promise<number> {
-  const holders = listeningPids(PREFERRED_PORT)
+  const holders = await listeningPids(PREFERRED_PORT)
   const busy = holders.length > 0 || (await portResponds(PREFERRED_PORT))
   if (!busy) return PREFERRED_PORT
 
-  const stale = [...new Set([...holders, ...readBackendPids()])].filter((pid) => isStaleBackend(pid))
-  const holdersAreOurs = holders.length === 0 || holders.every((pid) => isStaleBackend(pid))
-  if (stale.length > 0 && holdersAreOurs) {
-    for (const pid of stale) killProcessTree(pid)
-    if (waitUntilPortFree(PREFERRED_PORT, 5000) && !(await portResponds(PREFERRED_PORT))) {
-      return PREFERRED_PORT
+  const identity = await readRemoteIdentity(PREFERRED_PORT)
+  const pidFile = readBackendPids()
+  const needles = backendCommandNeedles()
+  let killed = false
+  for (const pid of holders) {
+    const command = await processCommandLine(pid)
+    if (
+      !mayKillStaleBackend({
+        pid,
+        selfPid: process.pid,
+        listening: holders,
+        pidFile,
+        command,
+        needles,
+        identity,
+      })
+    ) {
+      continue
     }
+    await killProcessTreeAsync(pid)
+    killed = true
+  }
+  if (killed && (await waitUntilPortFree(PREFERRED_PORT, 5000)) && !(await portResponds(PREFERRED_PORT))) {
+    return PREFERRED_PORT
   }
   const free = await findFreePort()
   console.warn(`port ${PREFERRED_PORT} is busy; backend will use ${free}`)
@@ -1038,7 +1140,16 @@ async function openDiskDetailWindow(deviceId: string): Promise<boolean> {
   }
 }
 
-function createWindow() {
+function startupHtml(): string {
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body style="font-family:Segoe UI,sans-serif;padding:48px;background:#eef3f7;color:#1c2430"><h2>パソコンちぇっ君</h2><p>起動しています。準備ができるまで、このままお待ちください。</p></body></html>`
+}
+
+function createWindow(options?: { loading?: boolean }) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    mainWindow.focus()
+    return
+  }
   const iconPath = resolveAppIconPath()
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -1063,7 +1174,13 @@ function createWindow() {
   })
 
   hardenWindow(mainWindow)
-  void loadRenderer(mainWindow)
+  if (options?.loading) {
+    void mainWindow.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(startupHtml())}`,
+    )
+  } else {
+    void loadRenderer(mainWindow)
+  }
 
   mainWindow.on('close', (e) => {
     if (!quitting) {
@@ -1219,18 +1336,22 @@ if (!gotLock) {
   takeoverFromNonElevatedPredecessor()
 
   app.on('second-instance', () => {
-    // トレイ常駐中に再起動されたら、既存ウィンドウを前面へ
-    if (!mainWindow || mainWindow.isDestroyed()) {
-      createWindow()
-    } else {
+    // トレイ常駐中に再起動されたら、既存ウィンドウを前面へ。
+    // 起動待ちのあいだはローディング画面が既にあるので、もう1枚は作らない。
+    if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.show()
       mainWindow.focus()
+      return
     }
+    if (!startupSettled) return
+    createWindow()
   })
 
   app.whenReady().then(async () => {
     registerIpc()
+    createTray()
+    createWindow({ loading: true })
     try {
       listenPort = await prepareBackendPort()
     } catch (error) {
@@ -1239,7 +1360,6 @@ if (!gotLock) {
     }
     // 画面より先にバックエンドを待ち受けさせる。起動時スキャンはそこで始める。
     startBackend()
-    createTray()
 
     try {
       await waitForServer(45000)
@@ -1254,7 +1374,14 @@ if (!gotLock) {
         }).show()
       }
     }
-    createWindow()
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      await loadRenderer(mainWindow)
+      mainWindow.show()
+      mainWindow.focus()
+    } else {
+      createWindow()
+    }
+    startupSettled = true
   })
 
   app.on('before-quit', () => {

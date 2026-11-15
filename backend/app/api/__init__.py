@@ -56,6 +56,16 @@ def api_health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/identity")
+def api_identity() -> dict[str, Any]:
+    """ループバックだけに、アプリ名と PID を返す。古いバックエンドの確認用。"""
+    import os
+
+    from app.config import APP_NAME
+
+    return {"name": APP_NAME, "pid": os.getpid()}
+
+
 @app.get("/api/about")
 def api_about() -> dict[str, Any]:
     from app.collectors.disks import is_elevated, smartctl_available

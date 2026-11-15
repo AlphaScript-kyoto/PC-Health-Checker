@@ -65,7 +65,10 @@ class LocalApiGuard(BaseHTTPMiddleware):
         if origin is not None and origin not in ALLOWED_ORIGINS:
             return JSONResponse(status_code=403, content={"detail": "許可されていないOriginです"})
 
-        # ブラウザの事前確認（OPTIONS）にはトークンが付かない
+        # ブラウザの事前確認（OPTIONS）にはトークンが付かない。
+        # 識別は名前と PID だけ。古いプロセスかどうかの確認に使い、トークンは要らない。
+        if request.method == "GET" and request.url.path == "/api/identity":
+            return await call_next(request)
         if request.method != "OPTIONS" and not token_matches(request.headers.get(TOKEN_HEADER, "")):
             return JSONResponse(status_code=401, content={"detail": "認証トークンが正しくありません"})
 
