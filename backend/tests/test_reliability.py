@@ -9,7 +9,14 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.alert_policy import decide_alert, dedupe_key_for, keys_to_resolve, legacy_dedupe_key
+from app.alert_policy import (
+    decide_alert,
+    dedupe_key_for,
+    keys_to_resolve,
+    legacy_dedupe_key,
+    resolve_notice,
+    skip_kinds_for_collection_errors,
+)
 from app.collectors.capacity import CapacityCollectionError, parse_volume_payload
 from app.collectors.disks import DiskCollectionError, ensure_disk_rows
 from app.collectors.inventory import inventory_error_message
@@ -20,6 +27,7 @@ from app.net_bind import port_is_free
 from app.schedule import (
     classify_scan_outcome,
     daily_is_due,
+    daily_outcome_covers_today,
     startup_covers_daily,
     startup_should_delay_daily,
 )
@@ -71,12 +79,52 @@ class AlertPolicyTests(unittest.TestCase):
 
     def test_same_level_new_reason_kind_notifies_once(self) -> None:
         record, notify = decide_alert(
-            {"level": "Watch", "kind": "disk", "target": "x", "message": "SSD摩耗度: 91%"},
+            {
+                "level": "Watch",
+                "kind": "disk",
+                "target": "x",
+                "message": "温度高め: 62°C / SSD摩耗度: 91%",
+            },
             "Watch",
             "温度高め: 61°C",
         )
         self.assertTrue(record)
         self.assertTrue(notify)
+
+    def test_shrinking_reasons_and_threshold_hover_do_not_notify(self) -> None:
+        broad = "SSD摩耗度: 90% / 温度高め: 61°C"
+        wear_only = "SSD摩耗度: 91%"
+        record, notify = decide_alert(
+            {"level": "Watch", "kind": "disk", "target": "x", "message": wear_only},
+            "Watch",
+            broad,
+        )
+        self.assertFalse(record)
+        self.assertFalse(notify)
+        # 記録しないので前回の本文は広いまま。温度が戻っても、新しい種類ではない。
+        record, notify = decide_alert(
+            {"level": "Watch", "kind": "disk", "target": "x", "message": "SSD摩耗度: 90% / 温度高め: 60°C"},
+            "Watch",
+            broad,
+        )
+        self.assertFalse(record)
+        self.assertFalse(notify)
+
+    def test_collection_failure_does_not_resolve_that_kind(self) -> None:
+        previous = {
+            "disk|sn:OLD": "Watch",
+            "disk_added|sn:OLD": "Watch",
+            "capacity|C:": "Watch",
+            "collection|disks": "Unknown",
+        }
+        skip = skip_kinds_for_collection_errors(disk_failed=True, capacity_failed=False)
+        resolved = keys_to_resolve(previous, {"collection|disks"}, skip_kinds=skip)
+        self.assertEqual(resolved, ["capacity|C:"])
+        self.assertNotIn("disk|sn:OLD", resolved)
+        self.assertNotIn("disk_added|sn:OLD", resolved)
+        title, message, device_id = resolve_notice("capacity|C:")
+        self.assertIn("C:", message)
+        self.assertEqual(device_id, "C:")
 
     def test_resolved_key_can_notify_again_at_the_same_level(self) -> None:
         self.assertEqual(keys_to_resolve({"capacity|C:": "Watch", "disk|sn:1": "OK"}, set()), ["capacity|C:"])
@@ -252,6 +300,35 @@ class KnownDiskTests(unittest.TestCase):
         self.assertEqual(changes["appeared"], [])
         self.assertEqual(changes["disappeared"], [])
 
+    def test_different_serial_is_not_linked_by_pnp(self) -> None:
+        pnp = r"SCSI\DISK&VEN_FOO\SLOT1"
+        old = {
+            "device_id": "0",
+            "model": "Foo",
+            "serial": "AAA111",
+            "pnp_device_id": pnp,
+        }
+        self.db.upsert_known_disks([old])
+        changes = self.db.upsert_known_disks(
+            [
+                {
+                    "device_id": "0",
+                    "model": "Foo",
+                    "serial": "BBB222",
+                    "pnp_device_id": pnp,
+                }
+            ]
+        )
+        self.assertEqual(len(changes["appeared"]), 1)
+        self.assertTrue(str(changes["appeared"][0]["stable_id"]).startswith("sn:BBB222"))
+        self.assertEqual(len(changes["disappeared"]), 1)
+        self.assertIn("AAA111", str(changes["disappeared"][0].get("device_id")))
+        with self.db.connect() as conn:
+            stored = [str(row["device_id"]) for row in conn.execute("SELECT device_id FROM known_disks")]
+        self.assertEqual(len(stored), 1)
+        self.assertTrue(stored[0].startswith("sn:BBB222"))
+        self.assertNotIn("AAA111", stored[0])
+
     def test_serial_id_does_not_fall_back_to_pnp_when_serial_disappears(self) -> None:
         base = {
             "device_id": "0",
@@ -417,6 +494,9 @@ class ScheduleAndPortTests(unittest.TestCase):
         self.assertTrue(startup_should_delay_daily("cancelled"))
         self.assertFalse(startup_should_delay_daily("failed"))
         self.assertFalse(startup_should_delay_daily("ok"))
+        self.assertTrue(daily_outcome_covers_today("cancelled"))
+        self.assertTrue(daily_outcome_covers_today("ok"))
+        self.assertFalse(daily_outcome_covers_today("failed"))
 
     def test_failed_startup_does_not_cover_the_daily_slot(self) -> None:
         self.assertFalse(startup_covers_daily(startup_succeeded=False, now_past_slot=True))

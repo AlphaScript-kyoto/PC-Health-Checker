@@ -6,7 +6,13 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app import db
-from app.alert_policy import decide_alert, dedupe_key_for, keys_to_resolve
+from app.alert_policy import (
+    decide_alert,
+    dedupe_key_for,
+    keys_to_resolve,
+    resolve_notice,
+    skip_kinds_for_collection_errors,
+)
 from app.collectors.capacity import CapacityCollectionError, collect_volumes
 from app.collectors.disks import (
     DiskCollectionError,
@@ -448,17 +454,22 @@ def run_scan(notify_alerts: bool = True, *, include_maps: bool = False) -> dict[
                     "level": str(alert.get("level") or ""),
                     "message": str(alert.get("message") or ""),
                 }
-            # 今回出なかった注意は解消として OK を残す。残したままだと、数週間後の再発を知らせられない。
+            # 今回出なかった継続中の注意だけ解消にする。
+            # ディスクや容量の取得に失敗した種類は、消えたのではなく未確認なので解消しない。
             previous_levels = {key: state.get("level", "") for key, state in latest_states.items()}
-            for key in keys_to_resolve(previous_levels, seen_keys):
-                kind = key.split("|", 1)[0] or "other"
+            skip_kinds = skip_kinds_for_collection_errors(
+                disk_failed=bool(raw.get("disk_collection_error")),
+                capacity_failed=bool(raw.get("volume_collection_error")),
+            )
+            for key in keys_to_resolve(previous_levels, seen_keys, skip_kinds=skip_kinds):
+                title, message, device_id = resolve_notice(key)
                 db.add_alert(
                     "OK",
-                    "注意は解消しました",
-                    "前回までの注意は、今回のスキャンでは見当たりませんでした。",
-                    None,
+                    title,
+                    message,
+                    device_id,
                     notified=False,
-                    kind=kind,
+                    kind=key.split("|", 1)[0] or "other",
                     dedupe_key=key,
                 )
 

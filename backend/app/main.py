@@ -27,6 +27,7 @@ from app.scanner import run_scan, scan_outcome, set_status_callback
 from app.schedule import (
     DAILY_RETRY_SEC,
     daily_is_due,
+    daily_outcome_covers_today,
     startup_covers_daily,
     startup_should_delay_daily,
 )
@@ -246,10 +247,12 @@ def _scheduler_loop() -> None:
                 seconds_since_failure=since_failure,
                 retry_sec=DAILY_RETRY_SEC,
             ):
-                ok = _run_scan_jobs("毎日の自動スキャン", announce=True) == "ok"
-                if ok:
+                outcome = _run_scan_jobs("毎日の自動スキャン", announce=True)
+                if daily_outcome_covers_today(outcome):
                     last_daily_scan_date = today
                     failed_daily_at = None
+                    if outcome == "cancelled":
+                        log.info("毎日の自動スキャンは中断されたため、本日分はここまでにします")
                 else:
                     failed_daily_at = time.time()
                     log.warning("毎日の自動スキャンに失敗したため、本日分としては数えません")

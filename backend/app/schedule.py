@@ -37,6 +37,11 @@ def startup_should_delay_daily(outcome: str) -> bool:
     return outcome == "cancelled"
 
 
+def daily_outcome_covers_today(outcome: str) -> bool:
+    """定刻スキャンは、成功しても利用者が止めても、その日は済ませる。失敗だけ再試行する。"""
+    return outcome in {"ok", "cancelled"}
+
+
 def daily_is_due(
     *,
     now_past_slot: bool,

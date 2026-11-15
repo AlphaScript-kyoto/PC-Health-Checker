@@ -131,6 +131,17 @@ def candidate_identities(disk: dict[str, Any]) -> list[str]:
     return found
 
 
+def _serial_key(serial: Any) -> str:
+    return _norm(serial).replace(" ", "")
+
+
+def serials_conflict(disk: dict[str, Any], row: dict[str, Any]) -> bool:
+    """両方に使えるシリアルがあり、それが違う。このときは PnP などで繋がない。"""
+    if not serial_usable(disk.get("serial")) or not serial_usable(row.get("serial")):
+        return False
+    return _serial_key(disk.get("serial")) != _serial_key(row.get("serial"))
+
+
 def choose_stored_id(current_best: str, existing_id: str | None) -> str:
     """一度シリアルで覚えた個体を、次回シリアルが取れないからといって別IDにしない。"""
     if not existing_id:

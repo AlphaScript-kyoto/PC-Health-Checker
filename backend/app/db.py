@@ -461,6 +461,7 @@ def upsert_known_disks(disks: list[dict[str, Any]]) -> dict[str, list[dict[str, 
         identity_from_known_row,
         normalized_pnp,
         serial_usable,
+        serials_conflict,
     )
 
     now = _utc_now()
@@ -495,9 +496,14 @@ def upsert_known_disks(disks: list[dict[str, Any]]) -> dict[str, list[dict[str, 
             if row is None:
                 for key in candidates:
                     found = by_identity.get(key)
-                    if found is not None and str(found.get("device_id") or "") not in consumed:
-                        row = found
-                        break
+                    if found is None or str(found.get("device_id") or "") in consumed:
+                        continue
+                    # シリアル同士が違うディスクは、同じ差込口の PnP などでは繋がない。
+                    # PnP で繋いでよいのは、どちらかのシリアルが無いときだけ。
+                    if not key.startswith("sn:") and serials_conflict(disk, found):
+                        continue
+                    row = found
+                    break
             if row is None:
                 row = _adopt_legacy_row(disk, rows, consumed)
             pnp_id = normalized_pnp(disk) or None

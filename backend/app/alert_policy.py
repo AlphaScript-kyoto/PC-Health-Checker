@@ -34,10 +34,21 @@ def dedupe_key_for(alert: dict[str, Any]) -> str:
     return f"{kind}|{alert_target(alert)}"
 
 
-def reason_signature(message: str | None) -> str:
-    """数字や単位の差を除いた理由の形。温度が 61℃ から 65℃ でも同じ、摩耗とは違う。"""
-    text = re.sub(r"\d+(?:\.\d+)?", "#", str(message or ""))
-    return re.sub(r"\s+", " ", text).strip().lower()
+# 一度きりの出来事。解消記録は残さず、対象が分かる文だけを別途使う。
+ONE_SHOT_KINDS = {"disk_added", "disk_removed"}
+DISK_ALERT_KINDS = {"disk", "disk_added", "disk_removed"}
+
+
+def reason_kinds(message: str | None) -> set[str]:
+    """理由を「 / 」で分け、数字を落とした種類の集合。"""
+    kinds: set[str] = set()
+    for part in re.split(r"\s*/\s*", str(message or "")):
+        label = re.sub(r"\d+(?:\.\d+)?", "", part)
+        label = re.sub(r"[%°℃()（）]", " ", label)
+        label = re.sub(r"\s+", " ", label).strip(" :：").lower()
+        if label:
+            kinds.add(label)
+    return kinds
 
 
 def decide_alert(
@@ -47,9 +58,10 @@ def decide_alert(
 ) -> tuple[bool, bool]:
     """戻り値は (履歴に残すか, 通知するか)。
 
-    - 同じ危険度で、理由の種類も同じなら残さない（空き％や温度の数字が変わっただけ、を含む）
-    - 危険度が上がったとき、または同じ危険度でも理由の種類が変わったとき通知する
-    - 良くなったときは履歴だけ更新し、通知しない（解消を OK で残すと、再発を再び知らせられる）
+    - 同じ危険度で、新しい理由の種類が増えていなければ残さない
+      （数字の変化、理由が減っただけ、しきい値付近の出入りを含む）
+    - 危険度が上がったとき、または同じ危険度で理由の種類が増えたとき通知する
+    - 良くなったときは履歴だけ更新し、通知しない
     """
     level = str(alert.get("level") or "")
     rank = LEVEL_RANK.get(level, 0)
@@ -57,23 +69,69 @@ def decide_alert(
         return True, level in NOTIFY_LEVELS
     previous = LEVEL_RANK.get(str(previous_level), 0)
     if rank == previous:
-        if previous_message is not None and reason_signature(alert.get("message")) != reason_signature(
-            previous_message
-        ):
-            return True, level in NOTIFY_LEVELS
-        return False, False
+        if previous_message is None:
+            return False, False
+        added = reason_kinds(alert.get("message")) - reason_kinds(previous_message)
+        if not added:
+            return False, False
+        return True, level in NOTIFY_LEVELS
     if rank > previous:
         return True, level in NOTIFY_LEVELS
     return True, False
 
 
-def keys_to_resolve(previous_levels: dict[str, str], seen_keys: set[str]) -> list[str]:
-    """今回のスキャンに無かった注意。OK を残して、同じ危険度の再発を再び知らせられるようにする。"""
-    return [
-        key
-        for key, level in previous_levels.items()
-        if key not in seen_keys and level not in ("", "OK")
-    ]
+def skip_kinds_for_collection_errors(*, disk_failed: bool, capacity_failed: bool) -> set[str]:
+    """取得に失敗した種類は、注意が消えたとは扱わない。"""
+    skip: set[str] = set()
+    if disk_failed:
+        skip.update(DISK_ALERT_KINDS)
+    if capacity_failed:
+        skip.add("capacity")
+    return skip
+
+
+def keys_to_resolve(
+    previous_levels: dict[str, str],
+    seen_keys: set[str],
+    *,
+    skip_kinds: set[str] | None = None,
+) -> list[str]:
+    """今回のスキャンに無かった継続中の注意。取得失敗の種類と、一度きりの出来事は除く。"""
+    skipped = set(skip_kinds or ())
+    skipped.update(ONE_SHOT_KINDS)
+    found: list[str] = []
+    for key, level in previous_levels.items():
+        if key in seen_keys or level in ("", "OK"):
+            continue
+        kind = key.split("|", 1)[0]
+        if kind in skipped:
+            continue
+        found.append(key)
+    return found
+
+
+def resolve_notice(key: str) -> tuple[str, str, str | None]:
+    """解消記録の題・本文・対象。対象がキーに含まれるときは、履歴から分かるように残す。"""
+    kind, _, target = key.partition("|")
+    shown = target if target and target != "-" else "対象不明"
+    device_id = None if not target or target == "-" else target
+    if kind == "capacity":
+        return (
+            "注意は解消しました",
+            f"{shown} の容量の注意は、今回のスキャンでは見当たりませんでした。",
+            device_id,
+        )
+    if kind == "disk":
+        return (
+            "注意は解消しました",
+            f"{shown} のディスクの注意は、今回のスキャンでは見当たりませんでした。",
+            device_id,
+        )
+    return (
+        "注意は解消しました",
+        f"{shown} の前回の注意は、今回のスキャンでは見当たりませんでした。",
+        device_id,
+    )
 
 
 def legacy_dedupe_key(title: str | None, device_id: str | None) -> tuple[str, str] | None:
