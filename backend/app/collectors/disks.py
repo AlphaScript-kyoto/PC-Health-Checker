@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from typing import Any
 
+from app.disk_identity import disk_stable_id
+
 # CrystalDiskInfo-like Japanese labels for common SMART IDs / names
 ATTR_LABELS_JA: dict[str, str] = {
     "01": "リードエラー率",
@@ -63,6 +65,9 @@ ATTR_LABELS_JA: dict[str, str] = {
     "Hardware_ECC_Recovered": "ハードウェアECC復旧",
     "Reallocated_Event_Count": "代替処理発生回数",
     "Percentage_Used": "SSD使用率",
+    "Available_Spare": "空きスペア",
+    "Available_Spare_Threshold": "空きスペアしきい値",
+    "Critical_Warning": "重大警告",
     "Media_Errors": "メディアエラー",
     "Wear": "摩耗度",
     "ReadErrorsTotal": "読取エラー合計",
@@ -723,6 +728,10 @@ def _normalize_smartctl_json(data: dict[str, Any]) -> dict[str, Any]:
             smart["attributes"]["Media_Errors"] = nvme["media_errors"]
         if "available_spare" in nvme:
             smart["available_spare"] = nvme["available_spare"]
+        if "available_spare_threshold" in nvme:
+            smart["available_spare_threshold"] = nvme["available_spare_threshold"]
+        if "critical_warning" in nvme:
+            smart["critical_warning"] = nvme["critical_warning"]
         if "data_units_written" in nvme:
             smart["data_units_written"] = nvme["data_units_written"]
         if "data_units_read" in nvme:
@@ -732,6 +741,8 @@ def _normalize_smartctl_json(data: dict[str, Any]) -> dict[str, Any]:
         for key, label in (
             ("percentage_used", "Percentage_Used"),
             ("available_spare", "Available_Spare"),
+            ("available_spare_threshold", "Available_Spare_Threshold"),
+            ("critical_warning", "Critical_Warning"),
             ("media_errors", "Media_Errors"),
             ("num_err_log_entries", "Error_Log_Entries"),
             ("controller_busy_time", "Controller_Busy_Time"),
@@ -1334,6 +1345,17 @@ def _enrich_summary(smart: dict[str, Any]) -> dict[str, Any]:
     return smart
 
 
+def ensure_disk_rows(data: Any) -> list[Any]:
+    """Get-PhysicalDisk の JSON。空は「ディスクが無い＝正常」ではなく取得失敗。"""
+    if isinstance(data, dict):
+        data = [data]
+    if not data:
+        raise DiskCollectionError(
+            "物理ディスクを取得できませんでした。判定は不明です。"
+        )
+    return list(data)
+
+
 def collect_disks() -> list[dict[str, Any]]:
     script = r"""
 Get-PhysicalDisk | Select-Object `
@@ -1348,10 +1370,7 @@ Get-PhysicalDisk | Select-Object `
         data = _run_ps(script, required=True)
     except PowerShellFailed as exc:
         raise DiskCollectionError(str(exc)) from exc
-    if isinstance(data, dict):
-        data = [data]
-    if not data:
-        return []
+    data = ensure_disk_rows(data)
 
     reliability = _reliability_counters()
     wmi_map = _wmi_smart_by_model()
@@ -1528,6 +1547,7 @@ Get-PhysicalDisk | Select-Object `
         _apply_rotation_fields(disk, smart)
 
         disk["smart"] = smart
+        disk["stable_id"] = disk_stable_id(disk)
         disks.append(disk)
 
     return disks

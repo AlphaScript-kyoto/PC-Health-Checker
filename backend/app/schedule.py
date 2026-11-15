@@ -1,0 +1,56 @@
+"""起動時スキャンと毎日スキャンが、互いの失敗を「済んだこと」にしないための判断。"""
+
+from __future__ import annotations
+
+# 定刻スキャンが失敗したあと、ディスクを叩き続けないための再試行間隔（秒）
+DAILY_RETRY_SEC = 15 * 60
+
+
+def startup_covers_daily(*, startup_succeeded: bool, now_past_slot: bool) -> bool:
+    """起動時スキャンが実際に成功し、すでに定刻を過ぎているときだけ当日分とみなす。
+
+    プロセスを定刻のあとに起動した、という事実だけでは済ませない。
+    画面側の起動スキャンが失敗して消えても、定刻スキャンは残る。
+    """
+    return bool(startup_succeeded and now_past_slot)
+
+
+def classify_scan_outcome(
+    *,
+    phase: str,
+    health_running: bool,
+    health_error: bool,
+    has_result: bool,
+) -> str:
+    """ok / cancelled / failed。中断は失敗と分け、すぐ定刻スキャンをやり直さない。"""
+    if phase == "cancelled":
+        return "cancelled"
+    if health_running or health_error:
+        return "failed"
+    if has_result:
+        return "ok"
+    return "failed"
+
+
+def startup_should_delay_daily(outcome: str) -> bool:
+    """利用者が止めた起動時スキャンの直後に、定刻スキャンを重ねない。"""
+    return outcome == "cancelled"
+
+
+def daily_outcome_covers_today(outcome: str) -> bool:
+    """定刻スキャンは、成功しても利用者が止めても、その日は済ませる。失敗だけ再試行する。"""
+    return outcome in {"ok", "cancelled"}
+
+
+def daily_is_due(
+    *,
+    now_past_slot: bool,
+    covered_today: bool,
+    seconds_since_failure: float | None,
+    retry_sec: float = DAILY_RETRY_SEC,
+) -> bool:
+    if not now_past_slot or covered_today:
+        return False
+    if seconds_since_failure is None:
+        return True
+    return seconds_since_failure >= retry_sec

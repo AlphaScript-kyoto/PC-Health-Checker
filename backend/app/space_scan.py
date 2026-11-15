@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -118,9 +119,24 @@ class SpaceScanState:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-_state = SpaceScanState()
+# 画面からの手動スキャンと、健康診断に付く自動スキャンは別状態にする。
+# 片方を止めても、もう片方の容量マップは止まらない。
+_manual = SpaceScanState()
+_auto = SpaceScanState()
+_ctx_state: ContextVar[SpaceScanState] = ContextVar("pchc_space_scan_state")
 _results_by_root: dict[str, dict[str, Any]] = {}
+_results_lock = threading.Lock()
 _scan_thread: threading.Thread | None = None
+
+# 固定ドライブは 3、リムーバブルは 2（Win32 GetDriveType）
+_DRIVE_FIXED = 3
+_DRIVE_REMOVABLE = 2
+
+
+def drive_type_included(drive_type: int, *, fixed_only: bool) -> bool:
+    if fixed_only:
+        return drive_type == _DRIVE_FIXED
+    return drive_type in (_DRIVE_REMOVABLE, _DRIVE_FIXED)
 
 
 def _normalize_root(root_path: str) -> str:
@@ -128,64 +144,107 @@ def _normalize_root(root_path: str) -> str:
 
 
 def get_progress() -> dict[str, Any] | None:
-    with _state.lock:
-        return dict(_state.progress) if _state.progress else None
+    with _manual.lock:
+        return dict(_manual.progress) if _manual.progress else None
 
 
 def get_result(root_path: str | None = None) -> dict[str, Any] | None:
-    with _state.lock:
+    with _manual.lock:
         if root_path:
             normalized = _normalize_root(root_path)
-            if _state.running and normalized == _normalize_root(_state.root_path or ""):
-                return None
-            return _results_by_root.get(normalized)
-        return _state.result
+            busy = _manual.running and normalized == _normalize_root(_manual.root_path or "")
+            with _results_lock:
+                if busy:
+                    return None
+                return _results_by_root.get(normalized)
+        return _manual.result
+
+
+def _cancel_state(state: SpaceScanState) -> None:
+    with state.lock:
+        state.cancelled = True
+        state.paused = False
+        state.resume_event.set()
 
 
 def cancel_scan() -> None:
-    with _state.lock:
-        _state.cancelled = True
-        _state.paused = False
-        _state.resume_event.set()
+    """画面の手動スキャンだけ止める。自動の容量マップには触れない。"""
+    _cancel_state(_manual)
 
 
-def pause_scan() -> dict[str, Any]:
-    with _state.lock:
-        if not _state.running:
+def cancel_auto_scan() -> None:
+    """健康診断に付いている自動の容量マップだけ止める。"""
+    _cancel_state(_auto)
+
+
+def _pause_state(state: SpaceScanState) -> dict[str, Any]:
+    with state.lock:
+        if not state.running:
             return {"ok": False, "message": "実行中のスキャンがありません"}
-        if _state.paused:
+        if state.paused:
             return {"ok": True, "paused": True}
-        _state.paused = True
-        _state.resume_event.clear()
-        if _state.progress:
-            _state.progress["phase"] = "paused"
+        state.paused = True
+        state.resume_event.clear()
+        if state.progress:
+            state.progress["phase"] = "paused"
         return {"ok": True, "paused": True}
 
 
-def resume_scan() -> dict[str, Any]:
-    with _state.lock:
-        if not _state.running:
+def _resume_state(state: SpaceScanState) -> dict[str, Any]:
+    with state.lock:
+        if not state.running:
             return {"ok": False, "message": "再開できるスキャンがありません"}
-        _state.paused = False
-        _state.resume_event.set()
-        if _state.progress:
-            _state.progress["phase"] = "scanning"
+        state.paused = False
+        state.resume_event.set()
+        if state.progress:
+            state.progress["phase"] = "scanning"
         return {"ok": True, "paused": False}
 
 
+def pause_scan() -> dict[str, Any]:
+    return _pause_state(_manual)
+
+
+def resume_scan() -> dict[str, Any]:
+    return _resume_state(_manual)
+
+
+def pause_auto_scan() -> dict[str, Any]:
+    return _pause_state(_auto)
+
+
+def resume_auto_scan() -> dict[str, Any]:
+    return _resume_state(_auto)
+
+
+def manual_scan_blocks(root_path: str) -> bool:
+    with _manual.lock:
+        if not _manual.running or not _manual.root_path:
+            return False
+        return _normalize_root(_manual.root_path) == _normalize_root(root_path)
+
+
+def auto_scan_blocks(root_path: str) -> bool:
+    with _auto.lock:
+        if not _auto.running or not _auto.root_path:
+            return False
+        return _normalize_root(_auto.root_path) == _normalize_root(root_path)
+
+
 def _checkpoint() -> bool:
-    """中断中は待機し、キャンセルされたら True を返す。"""
+    """中断中は待機し、キャンセルされたら True を返す。今のスレッドのスキャンだけを見る。"""
+    state = _ctx_state.get()
     while True:
-        with _state.lock:
-            if _state.cancelled:
+        with state.lock:
+            if state.cancelled:
                 return True
-            paused = _state.paused
+            paused = state.paused
         if not paused:
             return False
-        _state.resume_event.wait(0.2)
+        state.resume_event.wait(0.2)
 
 
-def list_drives() -> list[dict[str, Any]]:
+def list_drives(*, fixed_only: bool = False) -> list[dict[str, Any]]:
     import ctypes
     import string
 
@@ -196,8 +255,8 @@ def list_drives() -> list[dict[str, Any]]:
             continue
         root = f"{letter}:\\"
         drive_type = ctypes.windll.kernel32.GetDriveTypeW(root)
-        # 2 removable, 3 fixed
-        if drive_type not in (2, 3):
+        # 2 removable, 3 fixed。自動スキャンは固定だけ。
+        if not drive_type_included(int(drive_type), fixed_only=fixed_only):
             continue
         try:
             free_bytes = ctypes.c_ulonglong(0)
@@ -438,6 +497,8 @@ def _scan_dir(dir_path: str, depth: int, stats: dict[str, Any], emit: Callable[[
 def _run_scan(
     root_path: str,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    state: SpaceScanState,
 ) -> None:
     started = time.time()
     stats = {
@@ -449,6 +510,7 @@ def _run_scan(
         "currentPath": root_path,
     }
     last_emit = 0.0
+    token = _ctx_state.set(state)
 
     def emit(force: bool = False) -> None:
         nonlocal last_emit
@@ -456,15 +518,15 @@ def _run_scan(
         if not force and now - last_emit < 0.12:
             return
         last_emit = now
-        with _state.lock:
+        with state.lock:
             snapshot = {
                 "scannedFiles": stats["scannedFiles"],
                 "scannedDirs": stats["scannedDirs"],
                 "currentPath": stats["currentPath"],
                 "bytesSeen": stats["bytesSeen"],
-                "phase": "paused" if _state.paused else "scanning",
+                "phase": "paused" if state.paused else "scanning",
             }
-            _state.progress = dict(snapshot)
+            state.progress = dict(snapshot)
         # ロック外で通知（呼び出し側が別ロックを取る場合のデッドロック回避）
         if on_progress is not None:
             try:
@@ -477,8 +539,8 @@ def _run_scan(
     def _heartbeat() -> None:
         # scandir が長いときも「生きている」ことと現在パスを UI に流す
         while not heartbeat_stop.wait(2.0):
-            with _state.lock:
-                if not _state.running or _state.cancelled:
+            with state.lock:
+                if not state.running or state.cancelled:
                     return
             emit(True)
 
@@ -488,12 +550,12 @@ def _run_scan(
     try:
         emit(True)
         raw = _scan_dir(root_path, 0, stats, emit)
-        if _state.cancelled:
-            with _state.lock:
-                _state.running = False
-                _state.paused = False
-                _state.progress = None
-                _state.error = None
+        if state.cancelled:
+            with state.lock:
+                state.running = False
+                state.paused = False
+                state.progress = None
+                state.error = None
             return
         if not raw:
             raise RuntimeError(f"{root_path} を読み取れませんでした。")
@@ -508,60 +570,74 @@ def _run_scan(
             "durationMs": int((time.time() - started) * 1000),
             "rootPath": root_path,
         }
-        with _state.lock:
-            _state.result = result
-            _results_by_root[_normalize_root(root_path)] = result
-            _state.progress = None
-            _state.running = False
-            _state.paused = False
-            _state.error = None
+        with state.lock:
+            state.result = result
+            state.progress = None
+            state.running = False
+            state.paused = False
+            state.error = None
+            with _results_lock:
+                _results_by_root[_normalize_root(root_path)] = result
     except Exception as exc:
-        with _state.lock:
-            _state.running = False
-            _state.paused = False
-            _state.error = str(exc)
-            _state.progress = None
+        with state.lock:
+            state.running = False
+            state.paused = False
+            state.error = str(exc)
+            state.progress = None
     finally:
         heartbeat_stop.set()
         heartbeat.join(timeout=1.0)
+        _ctx_state.reset(token)
 
 
 def start_scan(root_path: str) -> dict[str, Any]:
     global _scan_thread
-    with _state.lock:
-        if _state.running:
+    if auto_scan_blocks(root_path):
+        return {
+            "ok": False,
+            "message": "自動の容量マップがこのドライブを走査中です。終わるまで待ってから、もう一度お試しください",
+        }
+    with _manual.lock:
+        if _manual.running:
             return {"ok": False, "message": "すでにスキャン中です"}
-        _state.running = True
-        _state.cancelled = False
-        _state.paused = False
-        _state.root_path = root_path
-        _state.resume_event.set()
-        _state.error = None
-        _state.result = None
-        _results_by_root.pop(_normalize_root(root_path), None)
-        _state.progress = {
+        _manual.running = True
+        _manual.cancelled = False
+        _manual.paused = False
+        _manual.root_path = root_path
+        _manual.resume_event.set()
+        _manual.error = None
+        _manual.result = None
+        with _results_lock:
+            _results_by_root.pop(_normalize_root(root_path), None)
+        _manual.progress = {
             "scannedFiles": 0,
             "scannedDirs": 0,
             "currentPath": root_path,
             "bytesSeen": 0,
             "phase": "scanning",
         }
-    _scan_thread = threading.Thread(target=_run_scan, args=(root_path,), daemon=True)
+    _scan_thread = threading.Thread(
+        target=_run_scan,
+        args=(root_path,),
+        kwargs={"state": _manual},
+        daemon=True,
+        name="pchc-space-manual",
+    )
     _scan_thread.start()
     return {"ok": True}
 
 
 def restart_scan(root_path: str) -> dict[str, Any]:
-    """実行中の走査を安全に止め、同じドライブを先頭から走査する。"""
-    with _state.lock:
+    """実行中の手動走査を安全に止め、同じドライブを先頭から走査する。"""
+    with _manual.lock:
         thread = _scan_thread
-        running = _state.running
+        running = _manual.running
     if running:
         cancel_scan()
         if thread and thread is not threading.current_thread():
             thread.join(timeout=5.0)
-        with _state.lock:
-            if _state.running:
+        with _manual.lock:
+            if _manual.running:
                 return {"ok": False, "message": "前のスキャンを停止しています。少し待ってから再度お試しください"}
     return start_scan(root_path)
 
@@ -570,32 +646,32 @@ def run_scan_blocking(
     root_path: str,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """健康診断スキャンから同期的に1ドライブ分のマップを作る。"""
-    with _state.lock:
-        if _state.running:
+    """健康診断スキャンから同期的に1ドライブ分のマップを作る。手動スキャンとは状態を共有しない。"""
+    with _auto.lock:
+        if _auto.running:
             return {"ok": False, "message": "すでにスキャン中です"}
-        _state.running = True
-        _state.cancelled = False
-        _state.paused = False
-        _state.root_path = root_path
-        _state.resume_event.set()
-        _state.error = None
-        _state.progress = {
+        _auto.running = True
+        _auto.cancelled = False
+        _auto.paused = False
+        _auto.root_path = root_path
+        _auto.resume_event.set()
+        _auto.error = None
+        _auto.progress = {
             "scannedFiles": 0,
             "scannedDirs": 0,
             "currentPath": root_path,
             "bytesSeen": 0,
             "phase": "scanning",
         }
-    _run_scan(root_path, on_progress=on_progress)
-    with _state.lock:
-        if _state.cancelled:
+    _run_scan(root_path, on_progress=on_progress, state=_auto)
+    with _auto.lock:
+        if _auto.cancelled:
             return {"ok": False, "message": "CANCELLED"}
-        if _state.error:
-            return {"ok": False, "message": _state.error}
+        if _auto.error:
+            return {"ok": False, "message": _auto.error}
         return {"ok": True, "rootPath": root_path}
 
 
 def get_error() -> str | None:
-    with _state.lock:
-        return _state.error
+    with _manual.lock:
+        return _manual.error

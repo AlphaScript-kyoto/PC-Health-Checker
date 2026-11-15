@@ -8,29 +8,45 @@ from typing import Any
 import psutil
 
 
+def inventory_error_message(exc: BaseException) -> str:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "PC情報の取得がタイムアウトしました"
+    return "PC情報の取得に失敗しました"
+
+
 def _run_ps(script: str) -> Any:
-    result = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            script,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=45,
-        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=45,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {"_collection_error": inventory_error_message(exc)}
+    except OSError:
+        return {"_collection_error": "PC情報の取得に失敗しました"}
     out = (result.stdout or "").strip()
+    if result.returncode != 0 and not out:
+        return {"_collection_error": "PC情報の取得に失敗しました"}
     if not out:
         return {}
     try:
-        return json.loads(out)
+        parsed = json.loads(out)
     except json.JSONDecodeError:
-        return {}
+        return {"_collection_error": "PC情報の応答を読み取れませんでした"}
+    if not isinstance(parsed, dict):
+        return {"_collection_error": "PC情報の応答を読み取れませんでした"}
+    return parsed
 
 
 # SMBIOSMemoryType -> human name (SMBIOS spec 7.18.2)
@@ -160,6 +176,9 @@ $gpus = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_
 } | ConvertTo-Json -Compress -Depth 4
 """
     data = _run_ps(script)
+    if not isinstance(data, dict):
+        data = {}
+    collection_error = data.get("_collection_error")
     mem = psutil.virtual_memory()
     cpu_name = (data.get("CpuName") or platform.processor() or "").strip() or None
     os_caption = (data.get("OsCaption") or "").strip() or None
@@ -176,7 +195,7 @@ $gpus = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_
     memory_summary = _memory_summary(data.get("MemoryModules"))
     gpu_summary = _gpu_summary(data.get("Gpus"))
 
-    return {
+    result = {
         "hostname": platform.node(),
         "platform": platform.platform(),
         "cpu_name": cpu_name,
@@ -197,3 +216,6 @@ $gpus = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_
         "os_version": os_version,
         "os": os_caption,  # UI 互換
     }
+    if collection_error:
+        result["collection_error"] = str(collection_error)
+    return result

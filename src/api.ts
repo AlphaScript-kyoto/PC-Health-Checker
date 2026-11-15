@@ -1,7 +1,28 @@
 const DEFAULT_BASE = 'http://127.0.0.1:8787'
 
+let resolvedBase: string | null = null
+
+/** Electron が選んだポート（8787 が塞がっているときは別ポート）を使う。 */
+export async function resolveApiBase(): Promise<string> {
+  if (resolvedBase) return resolvedBase
+  const read = window.desktopApi?.getBackendUrl
+  if (read) {
+    try {
+      const url = (await read()).trim().replace(/\/$/, '')
+      if (url) {
+        resolvedBase = url
+        return resolvedBase
+      }
+    } catch {
+      // 開発ブラウザなど、IPC が無いときは既定ポート
+    }
+  }
+  resolvedBase = DEFAULT_BASE
+  return resolvedBase
+}
+
 export function apiBase(): string {
-  return DEFAULT_BASE
+  return resolvedBase || DEFAULT_BASE
 }
 
 export class ApiError extends Error {
@@ -34,7 +55,7 @@ async function request<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const url = `${apiBase()}${path.startsWith('/') ? path : `/${path}`}`
+  const url = `${await resolveApiBase()}${path.startsWith('/') ? path : `/${path}`}`
   const token = await apiToken()
   const res = await fetch(url, {
     ...init,

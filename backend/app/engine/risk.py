@@ -12,6 +12,27 @@ def _worse(a: str, b: str) -> str:
     return a if STATUS_ORDER.get(a, 0) >= STATUS_ORDER.get(b, 0) else b
 
 
+def _as_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return int(value) if isinstance(value, bool) else None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text, 0) if text.lower().startswith("0x") else int(float(text))
+        except ValueError:
+            return None
+    if isinstance(value, dict):
+        # smartctl がビットをオブジェクトで返す場合、どれか立っていれば警告あり
+        return 1 if any(bool(v) for v in value.values()) else 0
+    return None
+
+
 def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     warn_pct = float(settings.get("capacity_warn_pct", 10))
     crit_pct = float(settings.get("capacity_critical_pct", 5))
@@ -20,7 +41,9 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     volume_issues: list[dict[str, Any]] = []
     alerts: list[dict[str, Any]] = []
     disk_error = raw.get("disk_collection_error")
-    overall = "Unknown" if disk_error else "OK"
+    volume_error = raw.get("volume_collection_error")
+    inventory_error = raw.get("inventory_collection_error")
+    overall = "Unknown" if (disk_error or volume_error or inventory_error) else "OK"
     if disk_error:
         alerts.append(
             {
@@ -28,7 +51,30 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
                 "title": "ディスク情報を取得できませんでした",
                 "message": "PowerShellからの取得に失敗したため、判定は不明です。",
                 "device_id": None,
-                "kind": "disk",
+                "kind": "collection",
+                "target": "disks",
+            }
+        )
+    if volume_error:
+        alerts.append(
+            {
+                "level": "Unknown",
+                "title": "空き容量を取得できませんでした",
+                "message": "ドライブの空き容量を確認できなかったため、容量の判定は不明です。",
+                "device_id": None,
+                "kind": "collection",
+                "target": "volumes",
+            }
+        )
+    if inventory_error:
+        alerts.append(
+            {
+                "level": "Unknown",
+                "title": "PC情報の一部を取得できませんでした",
+                "message": str(inventory_error),
+                "device_id": None,
+                "kind": "collection",
+                "target": "inventory",
             }
         )
 
@@ -58,6 +104,7 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
                     "message": issue["reason"],
                     "device_id": None,
                     "kind": "capacity",
+                    "target": vol.get("letter"),
                 }
             )
             overall = _worse(overall, level)
@@ -125,6 +172,24 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
             level = _worse(level, "ReplaceSoon" if wear < 95 else "Critical")
             reasons.append(f"SSD摩耗度: {wear}%")
 
+        # NVMe Critical Warning は 0 以外が「コントローラが重大とみなした」ビット列
+        critical_warning = _as_int(smart.get("critical_warning"))
+        if critical_warning is None:
+            critical_warning = _as_int(attrs.get("Critical_Warning"))
+        if critical_warning is not None and critical_warning != 0:
+            level = _worse(level, "Critical")
+            reasons.append(f"NVMeの重大警告: {critical_warning}")
+
+        spare = _as_int(smart.get("available_spare"))
+        if spare is None:
+            spare = _as_int(attrs.get("Available_Spare"))
+        spare_threshold = _as_int(smart.get("available_spare_threshold"))
+        if spare_threshold is None:
+            spare_threshold = _as_int(attrs.get("Available_Spare_Threshold"))
+        if spare is not None and spare_threshold is not None and spare <= spare_threshold:
+            level = _worse(level, "ReplaceSoon")
+            reasons.append(f"NVMeの空きスペア: {spare}%（しきい値 {spare_threshold}%）")
+
         temp = smart.get("temperature_c")
         if temp is not None:
             try:
@@ -186,6 +251,7 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
                     "message": " / ".join(reasons) if reasons else level,
                     "device_id": d.get("device_id"),
                     "kind": "disk",
+                    "target": d.get("stable_id") or d.get("device_id"),
                 }
             )
 
@@ -202,7 +268,17 @@ def evaluate(raw: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
         "elevated": bool(raw.get("elevated")),
         "smartctl_available": bool(raw.get("smartctl_available")),
     }
+    notes: list[str] = []
     if disk_error:
-        result["message"] = "ディスク情報を取得できなかったため、判定は不明です。"
+        notes.append("ディスク情報を取得できなかったため、判定は不明です。")
         result["disk_collection_error"] = str(disk_error)
+    if volume_error:
+        notes.append("ドライブの空き容量を取得できなかったため、容量の判定は不明です。")
+        result["volume_collection_error"] = str(volume_error)
+    if inventory_error:
+        notes.append(str(inventory_error))
+        result["inventory_collection_error"] = str(inventory_error)
+    if notes:
+        result["message"] = " ".join(notes)
+        result["collection_errors"] = notes
     return result

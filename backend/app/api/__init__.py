@@ -32,6 +32,7 @@ class SettingsUpdate(BaseModel):
     capacity_preference_tb: float | None = Field(None, ge=0.1, le=20)
     priority: str | None = None
     daily_scan_time: str | None = None
+    space_map_interval_days: int | None = Field(None, ge=0, le=30)
     startup_enabled: bool | None = None
     theme: str | None = None
 
@@ -53,6 +54,16 @@ def _valid_daily_scan_time(value: str) -> bool:
 @app.get("/api/health")
 def api_health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/identity")
+def api_identity() -> dict[str, Any]:
+    """ループバックだけに、アプリ名と PID を返す。古いバックエンドの確認用。"""
+    import os
+
+    from app.config import APP_NAME
+
+    return {"name": APP_NAME, "pid": os.getpid()}
 
 
 @app.get("/api/about")
@@ -172,6 +183,8 @@ def api_put_settings(body: SettingsUpdate) -> dict[str, Any]:
         updates["daily_scan_time"] = (
             f"{int(raw.split(':')[0]):02d}:{int(raw.split(':')[1]):02d}"
         )
+    if "space_map_interval_days" in updates:
+        updates["space_map_interval_days"] = int(updates["space_map_interval_days"])
     if "startup_enabled" in updates:
         from app.startup import set_startup
 

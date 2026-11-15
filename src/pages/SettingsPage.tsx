@@ -17,6 +17,7 @@ const DEFAULTS: AppSettings = {
   capacity_preference_tb: 2,
   priority: 'speed',
   daily_scan_time: '09:00',
+  space_map_interval_days: 1,
   startup_enabled: false,
   theme: 'system',
 }
@@ -64,6 +65,7 @@ export function SettingsPage({ showToast }: Props) {
         capacity_preference_tb: Number(form.capacity_preference_tb),
         priority: String(form.priority),
         daily_scan_time: String(form.daily_scan_time),
+        space_map_interval_days: Number(form.space_map_interval_days ?? 1),
         startup_enabled: Boolean(form.startup_enabled),
         theme: isThemePreference(form.theme) ? form.theme : 'system',
       })
@@ -141,6 +143,18 @@ export function SettingsPage({ showToast }: Props) {
               type="time"
               value={String(form.daily_scan_time || '09:00')}
               onChange={(e) => update('daily_scan_time', e.target.value)}
+            />
+          </label>
+
+          <label className="field">
+            <span>容量マップの自動間隔（日）</span>
+            <input
+              type="number"
+              min={0}
+              max={30}
+              step={1}
+              value={Number(form.space_map_interval_days ?? 1)}
+              onChange={(e) => update('space_map_interval_days', Number(e.target.value))}
             />
           </label>
 
@@ -229,6 +243,11 @@ export function SettingsPage({ showToast }: Props) {
             </select>
           </label>
         </div>
+
+        <p className="muted" style={{ marginTop: 12 }}>
+          容量マップの自動間隔が 0 のときは、起動時と毎日の健康診断のたびに固定ドライブを歩きます。1
+          以上は、その日数に 1 回だけ自動で作ります。USB メモリなどは自動では歩きません。画面からの手動スキャンはいつでもできます。
+        </p>
 
         <div style={{ marginTop: 16 }}>
           <button type="button" className="btn primary" disabled={saving} onClick={() => void save()}>

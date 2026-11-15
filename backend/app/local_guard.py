@@ -10,6 +10,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from app.config import PORT as _LISTEN_PORT
+
 # 開発中の Vite と、配布版（file:// は Origin が "null"）だけを許可する
 ALLOWED_ORIGINS = {
     "null",
@@ -22,7 +24,9 @@ ALLOWED_ORIGINS = {
     "http://localhost:5175",
     "http://localhost:5176",
 }
-ALLOWED_HOSTS = {"127.0.0.1:8787", "localhost:8787"}
+
+# 8787 が使用中のときは Electron が別ポートを渡す。そのポートだけを許可する。
+ALLOWED_HOSTS = {f"127.0.0.1:{_LISTEN_PORT}", f"localhost:{_LISTEN_PORT}"}
 LOOPBACK_CLIENTS = {"127.0.0.1", "::1"}
 TOKEN_HEADER = "x-pchc-token"
 
@@ -61,7 +65,10 @@ class LocalApiGuard(BaseHTTPMiddleware):
         if origin is not None and origin not in ALLOWED_ORIGINS:
             return JSONResponse(status_code=403, content={"detail": "許可されていないOriginです"})
 
-        # ブラウザの事前確認（OPTIONS）にはトークンが付かない
+        # ブラウザの事前確認（OPTIONS）にはトークンが付かない。
+        # 識別は名前と PID だけ。古いプロセスかどうかの確認に使い、トークンは要らない。
+        if request.method == "GET" and request.url.path == "/api/identity":
+            return await call_next(request)
         if request.method != "OPTIONS" and not token_matches(request.headers.get(TOKEN_HEADER, "")):
             return JSONResponse(status_code=401, content={"detail": "認証トークンが正しくありません"})
 
